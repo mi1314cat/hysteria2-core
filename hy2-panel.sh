@@ -59,7 +59,7 @@ generate_port() {
 create_shortcut() {
     cat > /usr/local/bin/catmihy2 << 'EOF'
 #!/bin/bash
-bash <(curl -fsSL https://github.com/mi1314cat/sing-box-xary-hysteria2.catmi/raw/refs/heads/main/cathy2.sh)
+bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh)
 EOF
     chmod +x /usr/local/bin/catmihy2
     print_info "快捷方式 'catmihy2' 已创建，可使用 'catmihy2' 命令运行脚本"
