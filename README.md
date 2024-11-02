@@ -9,6 +9,11 @@ bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/mai
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/fast-hy2.sh)
 ```
+### 添加日志
+#### hysteria2日志
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/log.sh)
+```
 # hysteria2服务管理
 ## 编辑配置文件
 ```
