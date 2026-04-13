@@ -38,14 +38,14 @@ generate_port() {
 
 # 随机伪装站
 random_site() {
-    shuf -n 1 <<EOF
+cat <<EOF | shuf -n 1
 https://www.cloudflare.com
 https://www.microsoft.com
 https://www.apple.com
 https://www.amazon.com
 EOF
 }
-
+FAKE_SITE=$(random_site)
 # 创建快捷方式
 create_shortcut() {
 cat > /usr/local/bin/catmihy2 << 'EOF'
@@ -67,7 +67,8 @@ FAKE_SITE=$(random_site)
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
 -keyout /etc/hysteria/server.key \
 -out /etc/hysteria/server.crt \
--subj "/CN=www.cloudflare.com" -days 36500
+-subj "/CN=${FAKE_SITE#https://}" \
+-days 36500
 
 chown hysteria /etc/hysteria/server.*
 
@@ -109,7 +110,7 @@ auth:
 masquerade:
   type: proxy
   proxy:
-    url: $(random_site)
+    url: $FAKE_SITE
     rewriteHost: true
 
 quic:
@@ -133,7 +134,7 @@ cat > /root/hy2/config.yaml <<EOF
   port: $PORT
   password: $AUTH_PASSWORD
 
-  sni: www.cloudflare.com
+  sni: ${FAKE_SITE#https://}
   skip-cert-verify: false
 
   alpn:
