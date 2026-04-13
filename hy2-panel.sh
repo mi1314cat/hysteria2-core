@@ -147,6 +147,14 @@ masquerade:
   proxy:
     url: https://cloudflare.com
     rewriteHost: true
+quic:
+  initStreamReceiveWindow: 8388608 
+  maxStreamReceiveWindow: 8388608 
+  initConnReceiveWindow: 20971520 
+  maxConnReceiveWindow: 20971520 
+  maxIdleTimeout: 30s 
+  maxIncomingStreams: 1024 
+  disablePathMTUDiscovery: false    
 EOF
 
 }
