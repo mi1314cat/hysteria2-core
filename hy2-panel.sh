@@ -126,16 +126,12 @@ cat > /root/hy2/config.yaml <<EOF
   server: $PUBLIC_IP
   port: $PORT
   password: $AUTH_PASSWORD
-
   sni: www.cloudflare.com
   skip-cert-verify: false
-
   alpn:
     - h3
-
   up: "60 Mbps"
   down: "150 Mbps"
-
   brutal-opts:
     enabled: true
     up: "60 Mbps"
