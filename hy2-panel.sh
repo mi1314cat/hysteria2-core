@@ -64,6 +64,8 @@ EOF
     chmod +x /usr/local/bin/catmihy2
     print_info "快捷方式 'catmihy2' 已创建，可使用 'catmihy2' 命令运行脚本"
 }
+ INSTALL_DIR="/root/catmi/hy2"
+ mkdir -p "$INSTALL_DIR"
   # 安装 Hysteria 2
   install_hysteria() {
     print_info "开始安装 Hysteria 2..."
@@ -126,7 +128,7 @@ EOF
     print_info "服务器地址：${PUBLIC_IP}"
     print_info "端口：${PORT}"
     print_info "密码：${AUTH_PASSWORD}"
-    print_info "配置文件已保存到：/root/hy2/config.yaml"
+    print_info "配置文件已保存到：/root/catmi/hy2/config.yaml"
 }
 
 # 创建服务端配置
@@ -161,8 +163,8 @@ EOF
 
 # 创建客户端配置
 create_client_config() {
-    mkdir -p /root/hy2
-    cat << EOF > /root/hy2/config.yaml
+    
+    cat << EOF > $INSTALL_DIR/config.yaml
 
   - name: Hy2-Hysteria2
     server: $PUBLIC_IP
@@ -185,7 +187,7 @@ uninstall_hysteria() {
     systemctl stop hysteria-server.service
     systemctl disable hysteria-server.service
     rm -rf /etc/hysteria
-    rm -rf /root/hy2
+    rm -rf /root/catmi/hy2
     rm -rf /etc/hysteria/server.crt
     rm -rf /etc/hysteria/server.key
     rm -f /usr/local/bin/catmihy2
@@ -206,8 +208,8 @@ update_hysteria() {
 
 # 查看客户端配置
 view_client_config() {
-    if [ -f "/root/hy2/config.yaml" ]; then
-        cat /root/hy2/config.yaml
+    if [ -f "/root/catmi/hy2/config.yaml" ]; then
+        cat /root/catmi/hy2/config.yaml
     else
         print_error "客户端配置文件不存在"
     fi
@@ -247,12 +249,12 @@ modify_config() {
 
     # 客户端配置
     # 确保客户端端口始终为 7890
-    if sed -i "s/^\s*port: [0-9]*$/    port: 7890/" /root/hy2/config.yaml; then
+    if sed -i "s/^\s*port: [0-9]*$/    port: 7890/" /root/catmi/hy2/config.yaml; then
         echo "客户端端口已保持为 7890"
     fi
 
     # 修改客户端中的代理端口为服务端新端口
-    if sed -i "s|^\s*port: [0-9]*$|    port: ${new_port}|" /root/hy2/config.yaml; then
+    if sed -i "s|^\s*port: [0-9]*$|    port: ${new_port}|" /root/catmi/hy2/config.yaml; then
         echo "成功修改客户端的代理端口号"
     else
         echo "修改客户端的代理端口号失败"
@@ -260,7 +262,7 @@ modify_config() {
     fi
 
     # 修改客户端密码
-    if sed -i "s|^\s*password: .*|    password: ${new_password}|" /root/hy2/config.yaml; then
+    if sed -i "s|^\s*password: .*|    password: ${new_password}|" /root/catmi/hy2/config.yaml; then
         echo "成功修改客户端的密码"
     else
         echo "修改客户端的密码失败"
@@ -271,7 +273,7 @@ modify_config() {
     echo "修改后服务端配置内容:"
     cat /etc/hysteria/config.yaml
     echo "修改后客户端配置内容:"
-    cat /root/hy2/config.yaml
+    cat /root/catmi/hy2/config.yaml
 
     echo "配置已修改为："
     echo "端口：${new_port}"
