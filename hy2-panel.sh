@@ -64,11 +64,12 @@ EOF
     chmod +x /usr/local/bin/catmihy2
     print_info "快捷方式 'catmihy2' 已创建，可使用 'catmihy2' 命令运行脚本"
 }
- INSTALL_DIR="/root/catmi/hy2"
- mkdir -p "$INSTALL_DIR"
+
   # 安装 Hysteria 2
   install_hysteria() {
     print_info "开始安装 Hysteria 2..."
+     INSTALL_DIR="/root/catmi/hy2"
+     mkdir -p "$INSTALL_DIR"
 
     # 安装依赖
     bash <(curl -fsSL https://get.hy2.sh/)
