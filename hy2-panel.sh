@@ -179,6 +179,10 @@ create_client_config() {
     alpn:
       - h3
 
+      
+**********************************************************************************************************************
+   hysteria2://$AUTH_PASSWORD@$PUBLIC_IP:$PORT?sni=cloudflare.com&&alpn=h3&insecure=1&allowInsecure=1#HY2-$num   
+
 EOF
 }
 
