@@ -233,6 +233,9 @@ uninstall_hysteria() {
     print_info "开始卸载 Hysteria 2..."
     systemctl stop hysteria-server.service
     systemctl disable hysteria-server.service
+    systemctl stop $RELAY_SERVICE 2>/dev/null
+    systemctl disable $RELAY_SERVICE 2>/dev/null
+    rm -f /etc/systemd/system/$RELAY_SERVICE
     rm -rf /etc/hysteria
     rm -rf "$INSTALL_DIR"
     rm -f /usr/local/bin/catmihy2
@@ -269,6 +272,9 @@ view_client_config() {
 # ============== 中继 (TCP/UDP Forwarding, 客户端功能) ==============
 # 中继是 Hysteria 客户端的能力: 在客户端机器监听本地端口, 经隧道转发到服务器网络上的任意地址
 RELAY_CONF="$INSTALL_DIR/relay.conf"
+# 中继服务端信息 (可指定任意 HY2 服务端; 未配置时回退到本机服务端)
+RELAY_SERVER_CONF="$INSTALL_DIR/relay-server.conf"
+RELAY_SERVICE="hysteria-relayclient.service"
 
 relay_list() {
     echo "==================== 当前中继映射 ===================="
@@ -317,25 +323,42 @@ relay_del() {
     print_info "已删除第 $num 条"
 }
 
+# 读取中继服务端信息 (优先自定义 relay-server.conf, 否则回退本机服务端)
+relay_server_info() {
+    unset RS_ADDR RS_AUTH RS_SNI
+    if [ -f "$RELAY_SERVER_CONF" ]; then
+        # shellcheck disable=SC1090
+        . "$RELAY_SERVER_CONF"
+    fi
+    if [ -z "$RS_ADDR" ]; then
+        RS_ADDR="$(client_server):$(server_port)"
+    fi
+    if [ -z "$RS_AUTH" ]; then
+        RS_AUTH="$(server_password)"
+    fi
+    if [ -z "$RS_SNI" ]; then
+        RS_SNI="$(server_domain)"
+    fi
+}
+
 relay_gen_config() {
     [ -f "$RELAY_CONF" ] || { print_error "没有中继映射, 请先添加"; return; }
-    local port password domain pubip
-    port=$(server_port)
-    password=$(server_password)
-    domain=$(server_domain)
-    pubip=$(client_server)
-    [[ -z "$port" || -z "$password" ]] && { print_error "服务端配置不完整, 请先安装"; return; }
-    [[ -z "$domain" ]] && domain="bing.com"
+    relay_server_info
+    if [ -z "$RS_ADDR" ] || [ -z "$RS_AUTH" ]; then
+        print_error "中继服务端信息不完整, 请先安装本机服务端或配置中继服务端(选项5)"
+        return
+    fi
+    [[ -z "$RS_SNI" ]] && RS_SNI=$(echo "$RS_ADDR" | cut -d: -f1)
 
     out_file="$INSTALL_DIR/client-relay.yaml"
     {
         echo "# Hysteria 2 客户端配置 (含中继端口映射)"
         echo "# 用法: 拷贝到客户端机器, hysteria client -c client-relay.yaml 运行"
         echo "# 注意: 中继需要原生 hysteria 客户端, Clash 不支持 tcpForwarding/udpForwarding"
-        echo "server: $pubip"
-        echo "auth: $password"
+        echo "server: $RS_ADDR"
+        echo "auth: $RS_AUTH"
         echo "tls:"
-        echo "  sni: $domain"
+        echo "  sni: $RS_SNI"
         echo "  insecure: true"
         echo "socks5:"
         echo "  listen: 127.0.0.1:1080"
@@ -366,8 +389,94 @@ relay_gen_config() {
     cat "$out_file"
 }
 
+# 配置中继服务端 (手动指定任意 HY2 服务端 IP:端口 + 认证密码)
+relay_server_set() {
+    relay_server_info
+    echo "==================== 中继服务端配置 ===================="
+    echo "当前: 地址=${RS_ADDR:-未设置}  认证=${RS_AUTH:-未设置}  SNI=${RS_SNI:-未设置}"
+    echo "(直接回车保持不变)"
+    read -p "服务端地址 (IP:端口, 如 1.2.3.4:16680): " new_addr
+    read -p "认证密码: " new_auth
+    read -p "SNI 域名 (伪装域名, 可空): " new_sni
+    new_addr=${new_addr:-$RS_ADDR}
+    new_auth=${new_auth:-$RS_AUTH}
+    new_sni=${new_sni:-$RS_SNI}
+    if [ -z "$new_addr" ] || [ -z "$new_auth" ]; then
+        print_error "地址和认证密码不能都为空"
+        return
+    fi
+    cat > "$RELAY_SERVER_CONF" << EOF
+RS_ADDR=$new_addr
+RS_AUTH=$new_auth
+RS_SNI=$new_sni
+EOF
+    print_info "中继服务端已保存: $RELAY_SERVER_CONF"
+    print_warning "运行中继前请先执行 '生成客户端中继配置' (选项4)"
+}
+
+# 启动/停止/状态: systemd 管理中继客户端
+relay_service_unit() {
+    cat > /etc/systemd/system/$RELAY_SERVICE << EOF
+[Unit]
+Description=Hysteria 2 Relay Client
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hysteria client -c $INSTALL_DIR/client-relay.yaml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+relay_start() {
+    # 启动前自动根据最新 relay.conf / relay-server.conf 重新生成配置,
+    # 这样"纯客户端"场景: 配好信息 -> 启动即用, 无需手动分两步
+    echo "---------------------- 重新生成中继配置 ----------------------"
+    relay_gen_config || { print_error "配置不完整, 无法启动"; return; }
+    relay_service_unit
+    systemctl daemon-reload
+    systemctl enable --now $RELAY_SERVICE >/dev/null 2>&1
+    if systemctl is-active --quiet $RELAY_SERVICE; then
+        print_info "中继客户端已启动 (systemd: $RELAY_SERVICE, 自动加载最新配置)"
+    else
+        print_error "启动失败, 查看: journalctl -u $RELAY_SERVICE -n 30"
+    fi
+}
+
+relay_stop() {
+    if systemctl is-active --quiet $RELAY_SERVICE; then
+        systemctl disable --now $RELAY_SERVICE >/dev/null 2>&1
+        print_info "中继客户端已停止"
+    else
+        print_info "中继客户端未在运行"
+    fi
+}
+
+relay_status() {
+    echo "==================== 中继客户端状态 ===================="
+    if systemctl is-active --quiet $RELAY_SERVICE; then
+        echo -e "  运行状态: ${GREEN}运行中${PLAIN} (systemd: $RELAY_SERVICE)"
+    else
+        echo -e "  运行状态: ${RED}未运行${PLAIN}"
+    fi
+    echo "  服务端: $( [ -f "$RELAY_SERVER_CONF" ] && grep RS_ADDR "$RELAY_SERVER_CONF" | cut -d= -f2 || echo '本机服务端' )"
+    echo "  监听映射: $( [ -f "$RELAY_CONF" ] && grep -c . "$RELAY_CONF" || echo 0 ) 条"
+    echo "  最近日志:"
+    journalctl -u $RELAY_SERVICE --no-pager -n 3 2>/dev/null | tail -3 || echo "  (无日志)"
+}
+
 relay_menu() {
     while true; do
+        relay_status_short=$(systemctl is-active $RELAY_SERVICE 2>/dev/null)
+        if [ "$relay_status_short" = "active" ]; then
+            rs_text="${GREEN}运行中${PLAIN}"
+        else
+            rs_text="${RED}未运行${PLAIN}"
+        fi
         echo -e "
   ${GREEN}中继端口映射 (客户端功能: TCP/UDP Forwarding)${PLAIN}
   ----------------------
@@ -375,15 +484,25 @@ relay_menu() {
   ${GREEN}2.${PLAIN} 添加中继映射
   ${GREEN}3.${PLAIN} 删除中继映射
   ${GREEN}4.${PLAIN} 生成客户端中继配置
+  ${GREEN}5.${PLAIN} 配置中继服务端 (IP:端口 + 认证)
+  ${GREEN}6.${PLAIN} 启动中继客户端
+  ${GREEN}7.${PLAIN} 停止中继客户端
+  ${GREEN}8.${PLAIN} 查看中继客户端状态
   ${GREEN}0.${PLAIN} 返回
+  ----------------------
+  中继客户端: ${rs_text}
   ----------------------"
-        read -p "请输入选项 [0-4]: " rc
+        read -p "请输入选项 [0-8]: " rc
         case "$rc" in
             0) return ;;
             1) relay_list ;;
             2) relay_add ;;
             3) relay_del ;;
             4) relay_gen_config ;;
+            5) relay_server_set ;;
+            6) relay_start ;;
+            7) relay_stop ;;
+            8) relay_status ;;
             *) echo -e "${RED}无效的选项 ${rc}${PLAIN}" ;;
         esac
         echo && read -p "按回车键继续..." && echo
