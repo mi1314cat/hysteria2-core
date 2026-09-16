@@ -206,7 +206,16 @@ EOF
 
 # 创建客户端配置 (Clash Meta 格式 + 分享链接)
 create_client_config() {
-    
+    # 官方 hy2 证书 /etc/hysteria/server.crt → 自动计算 pin（Xray26 出站必填, allowInsecure 已移除）
+    local CERT_PIN=""
+    if [[ -s /etc/hysteria/server.crt ]]; then
+        CERT_PIN=$(openssl x509 -in /etc/hysteria/server.crt -outform der 2>/dev/null | sha256sum | awk '{print tolower($1)}')
+    fi
+    local PIN_PART=""
+    if [[ "${#CERT_PIN}" == "64" && "$CERT_PIN" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]]; then
+        PIN_PART="&pin=${CERT_PIN}&hpkp=$(echo "$CERT_PIN" | fold -w2 | paste -sd: - | tr 'a-f' 'A-F')"
+    fi
+
     cat << EOF > "$INSTALL_DIR/config.yaml"
 
   - name: Hy2-Hysteria2
@@ -221,11 +230,13 @@ create_client_config() {
     alpn:
       - h3
 
-      
 **********************************************************************************************************************
-   hysteria2://$AUTH_PASSWORD@$PUBLIC_IP:$PORT?sni=${MASQ_DOMAIN}&alpn=h3&insecure=1#HY2
+   hysteria2://$AUTH_PASSWORD@$PUBLIC_IP:$PORT?sni=${MASQ_DOMAIN}&alpn=h3&insecure=1&allowInsecure=1&obfs=none&upmbps=45&downmbps=150${PIN_PART}#HY2
 
 EOF
+    mkdir -p "$INSTALL_DIR/out" "$INSTALL_DIR/../out"
+    cp "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/out/hy2_client.yaml"
+    # 或在上方文件中找分享链接出来
 }
 
 # 卸载 Hysteria 2
