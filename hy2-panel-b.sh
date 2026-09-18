@@ -1265,10 +1265,10 @@ $( [[ -n "$obfs_pw" ]] && echo "obfs:
 $( [[ -n "$hop_lines" ]] && echo "" && cat <<< "$hop_lines" )
 
 socks5:
-  listen: 127.0.0.1:10808
+  listen: ${CLIENT_LAN_IP:-0.0.0.0}:26542
 
 http:
-  listen: 127.0.0.1:8080
+  listen: ${CLIENT_LAN_IP:-0.0.0.0}:26543
 EOF
     
 
@@ -1676,6 +1676,17 @@ validate_client_cfg() {
 # systemd: hysteria-client.service (由本脚本生成, 使用 current.yaml)
 # =====================================================================
 CLIENT_DIR="/root/catmi/hy2_client"
+
+# 本机局域网 IP (默认监听用; 取默认路由出口地址, 失败回落 0.0.0.0)
+detect_lan_ip() {
+    local ip
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')
+    [[ -z "$ip" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [[ -z "$ip" ]] && ip="0.0.0.0"
+    echo "$ip"
+}
+CLIENT_LAN_IP=$(detect_lan_ip)
+
 CLIENT_NODE_DIR="${CLIENT_DIR}/nodes"
 CLIENT_BIN="/usr/local/bin/hysteria"
 
@@ -1837,13 +1848,13 @@ client_node_import_menu() {
             local gen
             gen=$(client_parse_uri "$uri") || return 1
             # 本地代理监听 (默认自动跳过被占端口)
-            local d_s5="127.0.0.1:10808" d_hp="127.0.0.1:8080"
+            local d_s5="${CLIENT_LAN_IP}:26542" d_hp="${CLIENT_LAN_IP}:26543"
             cc_addr_free "$d_s5" || { d_s5=$(cc_find_free "$d_s5"); print_info "默认 socks5 10808 被占用, 已自动调节为空闲端口 $d_s5"; }
             cc_addr_free "$d_hp" || { d_hp=$(cc_find_free "$d_hp"); print_info "默认 http 8080 被占用, 已自动调节为空闲端口 $d_hp"; }
             read -p "socks5 监听 (默认 $d_s5, 直接回车即用): " s5
             read -p "http   监听 (默认 $d_hp , 直接回车即用): " hp
             s5="${s5:-${d_s5}}"; hp="${hp:-${d_hp}}"
-            [[ "${s5:-127.0.0.1:10808}" == 0.0.0.0:* || "${hp:-127.0.0.1:8080}" == 0.0.0.0:8080 ]] && \
+            [[ "${s5:-${CLIENT_LAN_IP}:26542}" == 0.0.0.0:* || "${hp:-${CLIENT_LAN_IP}:26543}" == 0.0.0.0:* ]] && \
                 print_warning "监听 0.0.0.0 = 本机全接口暴露, 请自行确认!"
             # —— 高级客户端流量设置 (bandwidth/congestion/Chrome Parrot), 空回车=保持链接默认 (parrot on) ——
             local atvb=""
@@ -1865,9 +1876,9 @@ client_node_import_menu() {
 # [${name}] (来自 hysteria2 链接导入, "$(date +"%F %T")")
 ${gen}${atvb}
 socks5:
-  listen: ${s5:-127.0.0.1:10808}
+  listen: ${s5:-${CLIENT_LAN_IP}:26542}
 http:
-  listen: ${hp:-127.0.0.1:8080}
+  listen: ${hp:-${CLIENT_LAN_IP}:26543}
 EOF
             if [[ -n "$atvb" ]]; then
                 python3 - "${CLIENT_NODE_DIR}/${name}.yaml" <<'PYEOF'
@@ -2077,8 +2088,8 @@ client_health() {
     local sp hp
     sp=$(awk '/^socks5:/{f=1} f&&/^  listen:/{print $2; exit}' "${cur}" 2>/dev/null)
     hp=$(awk '/^http:/{f=1}  f&&/^  listen:/{print $2; exit}' "${cur}" 2>/dev/null)
-    [[ -n "$sp" ]] || sp="127.0.0.1:10808"
-    [[ -n "$hp" ]] || hp="127.0.0.1:8080"
+    [[ -n "$sp" ]] || sp="${CLIENT_LAN_IP}:26542"
+    [[ -n "$hp" ]] || hp="${CLIENT_LAN_IP}:26543"
     local s5="socks5h://${sp}" eip1 eip2 direct
     eip1=$(curl -4 -sx "$s5" --max-time 12 https://api.ipify.org 2>/dev/null)
     if [[ -n "$eip1" && "$eip1" != 127.* ]]; then ok=$((ok+1)); echo "PASS  SOCKS5 → HTTPS 出站 (出口 IPv4: $eip1)"; else fail=$((fail+1)); echo "FAIL  SOCKS5 → HTTPS 出站失败"; fi
@@ -2345,13 +2356,13 @@ client_do_proxy_probe() {
     [[ -f "${CLIENT_DIR}/current.yaml" ]] || { print_error "请先选择当前节点 (菜单 4)"; return 1; }
     local sp=$(awk '/^socks5:/{f=1} f&&/listen:/{print $2; exit}' "${CLIENT_DIR}/current.yaml")
     local hpl=$(awk '/^http:/{f=1} f&&/listen:/{print $2; exit}' "${CLIENT_DIR}/current.yaml")
-    local s5h="socks5h://${sp:-127.0.0.1:10808}"
+    local s5h="socks5h://${sp:-${CLIENT_LAN_IP}:26542}"
     echo -n " socks5 TCP  : "; curl -sx "$s5h" -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" --max-time 10 https://www.gstatic.com/generate_204
-    echo -n " HTTPS CONNECT: "; curl -sx socks5h://"${sp:-127.0.0.1:10808}" -o /dev/null -w "HTTP %{http_code}\n" --max-time 10 --connect-to ::https://www.google.com https://www.debian.org 2>/dev/null || \
-        curl -sx http://"${hpl:-127.0.0.1:8080}" -o /dev/null -w "HTTP %{http_code}\n" --max-time 10 https://www.debian.org
-    echo -n " HTTP 代理   : "; curl -sx http://"${hpl:-127.0.0.1:8080}" -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" --max-time 10 http://example.com
-    echo -n " IPv4 连接   : "; curl -4 -sx socks5h://"${sp:-127.0.0.1:10808}" -o /dev/null -w "%{http_code}\n" --max-time 10 https://api.ip.sb/ip 2>/dev/null || echo FAIL
-    echo -n " IPv6 连接   : "; curl -sx socks5h://"${sp:-127.0.0.1:10808}" -o /dev/null -w "%{http_code}\n" --max-time 10 https://api6.ipify.org 2>/dev/null || echo FAIL
+    echo -n " HTTPS CONNECT: "; curl -sx socks5h://"${sp:-${CLIENT_LAN_IP}:26542}" -o /dev/null -w "HTTP %{http_code}\n" --max-time 10 --connect-to ::https://www.google.com https://www.debian.org 2>/dev/null || \
+        curl -sx http://"${hpl:-${CLIENT_LAN_IP}:26543}" -o /dev/null -w "HTTP %{http_code}\n" --max-time 10 https://www.debian.org
+    echo -n " HTTP 代理   : "; curl -sx http://"${hpl:-${CLIENT_LAN_IP}:26543}" -o /dev/null -w "HTTP %{http_code} %{time_total}s\n" --max-time 10 http://example.com
+    echo -n " IPv4 连接   : "; curl -4 -sx socks5h://"${sp:-${CLIENT_LAN_IP}:26542}" -o /dev/null -w "%{http_code}\n" --max-time 10 https://api.ip.sb/ip 2>/dev/null || echo FAIL
+    echo -n " IPv6 连接   : "; curl -sx socks5h://"${sp:-${CLIENT_LAN_IP}:26542}" -o /dev/null -w "%{http_code}\n" --max-time 10 https://api6.ipify.org 2>/dev/null || echo FAIL
 }
 
 # 卸载 Hysteria 2
