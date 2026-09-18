@@ -1428,9 +1428,10 @@ EOF
 
 node_list() {
     scan_nodes
-    ((${#NODE_NAMES[@]} == 0)) && { print_warning "未发现节点 (请先执行 '安装' 或 '多节点->新增节点')"; return; }
-    local n uf st i=1
-    echo "${GREEN}节点列表${PLAIN}"
+    ((${#NODE_NAMES[@]} == 0)) && { print_warning "未发现节点 (请先执行 '1 服务端→1 安装' 或 '→2 多节点管理→2 新增节点')"; return; }
+    local n uf st i=1 num
+    echo "节点列表"
+    echo "----------------------"
     for n in "${NODE_NAMES[@]}"; do
         uf=$(node_file "$n")
         if [[ "$n" == "default" ]]; then
@@ -1438,44 +1439,84 @@ node_list() {
         else
             st=$(systemctl is-active "hysteria-server@${n}.service" 2>/dev/null || echo inactive)
         fi
-        printf "  %d) %-14s listen=%-13s %s %s\n" "$i" "$n" "$(node_get "$uf" listen)" \
-            "$( [[ $st == active ]] && echo "${GREEN}[运行]${PLAIN}" || echo "${RED}[停止]${PLAIN}" )" \
-            "masq=$(node_get "$uf" masq) obfs=$( [[ -n "$(node_get "$uf" obfs_pw)" ]] && echo salamander || echo none )"
+        num=$(printf "%02d" "$i")
+        local ob="无"
+        [[ -n "$(node_get "$uf" obfs_pw 2>/dev/null)" ]] && ob="Salamander"
+        echo -e "  ${GREEN}${num})${PLAIN} $(printf '%-14s' "$n") ${BLUE}$(printf '%-27s' "$(node_get "$uf" listen 2>/dev/null)")${PLAIN} $( [[ $st == active ]] && echo -e "${GREEN}● 运行中${PLAIN}" || echo -e "${RED}○ 停止${PLAIN}" )  混淆: $(printf '%-10s' "$ob") 伪装: $(node_get "$uf" masq 2>/dev/null)"
         ((i++))
     done
 }
 
 node_pick() {
     scan_nodes
-    ((${#NODE_NAMES[@]} == 0)) && return 1
-    local i=1
-    for n in "${NODE_NAMES[@]}"; do echo "  $i) $n" >&2; ((i++)); done
-    printf "选择节点编号 (1-${#NODE_NAMES[@]}): " >&2
-    read -r c 2>/dev/null </dev/tty || { read -r c <&0 || c=""; }
-    if [[ "$c" =~ ^[0-9]+$ ]] && (( c >= 1 && c <= ${#NODE_NAMES[@]} )); then
+    ((${#NODE_NAMES[@]} == 0)) && { print_warning "无节点"; return 1; }
+    local n c num
+    echo "节点列表" >&2
+    echo "----------------------" >&2
+    local i=1 uf st ob
+    for n in "${NODE_NAMES[@]}"; do
+        uf=$(node_file "$n")
+        if [[ "$n" == "default" ]]; then
+            st=$(systemctl is-active hysteria-server.service 2>/dev/null || echo inactive)
+        else
+            st=$(systemctl is-active "hysteria-server@${n}.service" 2>/dev/null || echo inactive)
+        fi
+        num=$(printf "%02d" "$i")
+        ob="无"; [[ -n "$(node_get "$uf" obfs_pw 2>/dev/null)" ]] && ob="Salamander"
+        echo -e "  ${GREEN}${num})${PLAIN} $(printf '%-14s' "$n") ${BLUE}$(printf '%-24s' "$(node_get "$uf" listen 2>/dev/null)")${PLAIN} $( [[ $st == active ]] && echo -e "${GREEN}● 运行中${PLAIN}" || echo -e "${RED}○ 停止${PLAIN}" )  混淆: $ob" >&2
+        ((i++))
+    done
+    printf "选择节点 (1-%d): " "${#NODE_NAMES[@]}" >&2
+    if ! read -r c; then
+        print_error "输入流被中断, 已安全退出"; exit 130
+    fi
+    if [[ "$c" =~ ^[0-9]+$ ]] && (( c>=1 && c<=${#NODE_NAMES[@]} )); then
         echo "${NODE_NAMES[$((c-1))]}"
         return 0
     fi
-    return 1
+    print_error "无效的选项"; return 1
+}
+
+
+# 查看某节点的客户端配置 + 分享链接 (单独节点视图)
+node_show_client() {
+    local n; n=$(node_pick) || { print_warning "无节点"; return; }
+    ensure_node_dirs
+    local d="${NODES_OUT_DIR}/${n}"
+    if [[ -f "${d}/client.yaml" ]]; then
+        echo "==================== 节点 $n 客户端配置 (client.yaml) ===================="
+        cat "${d}/client.yaml"
+    else
+        print_warning "$n 尚未导出过; 先执行菜单 5 一键导出"
+    fi
+    if [[ -f "${d}/share.txt" ]]; then
+        echo ""
+        echo "分享链接:"
+        cat "${d}/share.txt"
+    fi
 }
 
 node_menu() {
     while true; do
         echo -e "
-  ${GREEN}多节点管理${PLAIN} (官方 hysteria-server@<名称>.service 模板)
+  ${GREEN}多节点管理${PLAIN} (默认节点 default 也算其中之一)
   ----------------------
   1. 列出节点 / 状态
-  2. 新增节点 (四特性可选)
+  2. 新增节点
   3. 节点 启动/停止/重启/状态
   4. 删除节点
-  5. 导出全部客户端配置 (client.yaml + share link)
+  5. 导出全部客户端配置
+  6. 查看某节点的客户端配置 + 分享链接
+  7. 修改节点配置
   0. 返回
   ----------------------"
-        read -p "请输入选项 [0-5]: " nc || { echo "输入流已结束(EOF), 退出"; exit 130; }
+        read -p "请输入选项 [0-7]: " nc || { echo "输入流已结束(EOF), 退出"; exit 130; }
         case "$nc" in
             0) return ;;
             1) node_list ;;
             2) node_add ;;
+            6) node_show_client ;;
+            7) server_edit_config ;;
             3)
                 local n=$(node_pick) || { print_warning "无节点"; continue; }
                 local uf=$(node_file "$n")
@@ -1904,8 +1945,8 @@ PYEOF
 
 client_node_pick() {
     ensure_client_dirs
-    local y f
-    local -a CL=[]
+    local y f c num
+    local -a CL=()
     shopt -s nullglob
     CL=()
     for y in "${CLIENT_NODE_DIR}"/*.yaml; do
@@ -1914,16 +1955,24 @@ client_node_pick() {
     shopt -u nullglob
     ((${#CL[@]} == 0)) && { print_warning "暂无节点, 请先导入 (菜单 3)"; return 1; }
     local i=1
-    for f in "${CL[@]}"; do echo "  $i) $f" >&2; ((i++)); done
-    printf "选择节点 (1-${#CL[@]}): " >&2
+    echo "节点列表" >&2
+    echo "----------------------" >&2
+    for f in "${CL[@]}"; do
+        num=$(printf "%02d" "$i")
+        local srv
+        srv=$(awk '/^server:/{print $2; exit}' "${CLIENT_NODE_DIR}/${f}.yaml")
+        echo -e "  ${GREEN}${num})${PLAIN} $(printf '%-16s' "$f") ${BLUE}${srv}${PLAIN}" >&2
+        ((i++))
+    done
+    printf "选择节点 (1-%d): " "${#CL[@]}" >&2
     if ! read -r c; then
-        print_error "输入流已结束(EOF), 退出"; exit 130
+        print_error "输入流被中断, 已安全退出"; exit 130
     fi
     if [[ "$c" =~ ^[0-9]+$ ]] && (( c>=1 && c<=${#CL[@]} )); then
         echo "${CL[$((c-1))]}"
         return 0
     fi
-    return 1
+    print_error "无效的选项"; return 1
 }
 
 # systemd unit
@@ -1962,18 +2011,33 @@ client_status()   { systemctl status hysteria-client.service --no-pager | head -
 # 客户端节点列表 (nodes/*.yaml)
 client_node_list() {
     ensure_client_dirs
-    local i=1 f
-    echo "节点列表 (sources in ${CLIENT_NODE_DIR}):"
+    local i=1 f name num
+    echo "节点列表"
+    echo "----------------------"
     local has=0
     for f in "${CLIENT_NODE_DIR}"/*.yaml; do
         [[ -f "$f" ]] || { echo "  (空 — 还没有任何节点)"; return; }
-        local srv=$(awk '/^server:/{print $2; exit}' "$f")
-        local bwup bwdn
-        bwup=$(awk '/^bandwidth:/{f=1;next} f&&/^  up:/{ if ($3=="") print $2; else print $2" "$3; exit }' "$f")
-        printf "  %d) %-20s 出口=%-24s 上行=%-12s\n" "$i" "${f%.yaml}" "${srv:-?}" "${bwup:-未设置}"
-        ((i++))
+        name="${f##*/}"; name="${name%.yaml}"
+        num=$(printf "%02d" "$i")
+        local srv bwup bwdn obfs sni
+        srv=$(awk '/^server:/{print $2; exit}' "$f")
+        bwup=$(awk '/^bandwidth:/{f=1;next} f&&/^  up:/{print $2; exit}' "$f")
+        bwdn=$(awk '/^bandwidth:/{f=1;next} f&&/^  down:/{print $2; exit}' "$f")
+        obfs=$(awk '/^obfs:/{f=1;next} f&&/^  type:/{print $2; exit}' "$f")
+        sni=$(awk '/^tls:/{f=1;next} f&&/^  sni:/{print $2; exit}' "$f")
+        local obs="无"
+        [[ "$obfs" == "salamander" ]] && obs="Salamander"
+        printf "  ${GREEN}%s${PLAIN}) %-16s ${BLUE}%-26s${PLAIN} 上/下: ${YELLOW}%-9s${PLAIN} 混淆: ${CYAN}%-9s${PLAIN} 伪装: %s\n" \
+            "$num" "$name" "${srv:-?}" "${bwup:-自动}/${bwdn:-自动}" "$obs" "${sni:-?}"
+        has=1; ((i++))
     done
+    [[ -f "${CLIENT_DIR}/current.yaml" ]] && {
+        local cur
+        cur=$(awk '/^server:/{print $2; exit}' "${CLIENT_DIR}/current.yaml")
+        echo "  当前节点出口 : ${cur:-?}"
+    }
 }
+
 client_logs()     { journalctl -u hysteria-client.service -n 40 --no-pager ${1:+-f} ; }
 
 # 健康检查 (进程/监听/真实出站: HTTP/HTTPS/UDP/IPv4/IPv6, 出口 IP 一致性验证)
@@ -2225,7 +2289,13 @@ client_do_logs() {
 }
 
 client_kernel_version() {
-    [[ -x "$CLIENT_BIN" ]] && $CLIENT_BIN version | head -4 || print_warning "内核未安装"
+    if [[ -x "$CLIENT_BIN" ]]; then
+        echo "  内核路径 : $CLIENT_BIN"
+        local kv; kv=$("$CLIENT_BIN" version 2>/dev/null | grep -a "^Version" | head -1 | tr -d "\t")
+        echo "  内核版本 : ${kv#Version:}"
+    else
+        print_warning "客户端内核未安装 (请使用 1.安装 / 更新内核)"
+    fi
 }
 
 client_node_switch() {
@@ -2268,12 +2338,18 @@ client_do_proxy_probe() {
 uninstall_hysteria() {
     echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${PLAIN}"
     echo -e "${RED}!!  危险: 即将彻底卸载 Hysteria 2 并删除
-!!  所有节点配置和证书 (删掉就找不回!))  ${PLAIN}"
+!!  会删除: /etc/hysteria (所有自签证书/节点配置) 和程序本体
+!!  不会删除: 你自己的 nginx / CF Origin CA 等外部证书 (只引用过路径)${PLAIN}"
     echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${PLAIN}"
-    printf "确认要继续? 输入大写 U N I N S T A L L 逐字确认: "
+    printf "确认要继续? (y/N): "
     local confirm
     read -r confirm
-    [[ "$confirm" == "UNINSTALL" ]] || { print_warning "已取消 (未删除任何东西)"; return 1; }
+    confirm=$(echo "$confirm" | xargs | tr '[:upper:]' '[:lower:]')
+    confirm="${confirm:-n}"
+    case "$confirm" in
+        y|yes) : ;;
+        *) print_warning "已取消 (未删除任何东西)"; return 1 ;;
+    esac
     mkdir -p /tmp/hysteria-uninstall-bak
     tar -czf /tmp/hysteria-uninstall-bak/hysteria-$(date +%m%d%H%M).tar.gz /etc/hysteria "$INSTALL_DIR" 2>/dev/null
     print_info "卸载前已自动备份到 /tmp/hysteria-uninstall-bak/"
@@ -2295,10 +2371,11 @@ uninstall_hysteria() {
     rm -f /etc/systemd/system/$RELAY_SERVICE
     systemctl daemon-reload
     rm -rf /etc/hysteria
-    rm -rf "$INSTALL_DIR"
-    rm -f /usr/local/bin/catmihy2
+    # 避免面板脚本自杀导致 VPS 断连后无法恢复: 保留自己与节点导出目录
+    rm -rf "${INSTALL_DIR:?}/nodes" "${INSTALL_DIR:?}/out"
+    rm -f /etc/systemd/system/${RELAY_SERVICE}.service 2>/dev/null
     systemctl daemon-reload
-    print_info "Hysteria 2 已成功卸载"
+    print_info "Hysteria 2 服务已卸载完成 (面板脚本与卸载备份保留在原处; /tmp/hysteria-uninstall-bak/ 可用于恢复)"
 }
 
 # 更新 Hysteria 2
@@ -2314,9 +2391,9 @@ update_hysteria() {
         [[ -n "$un" ]] || continue
         systemctl restart "$un" 2>/dev/null
         print_info "  已重启: $un"
-    done < <(systemctl list-units "hysteria-server@*" --type=service --no-legend 2>/dev/null | awk '{print $1}')
+    done < <(systemctl list-units "hysteria-server@*" --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -a "^hysteria-")
     systemctl restart hysteria-client.service 2>/dev/null
-    systemctl restart hysteria-server.service
+    systemctl restart hysteria-server.service && print_info "  已重启: hysteria-server.service (default)"
 }
 
 # 从服务端配置解析当前值 (供客户端管理/修改配置使用)
@@ -2459,6 +2536,19 @@ relay_server_set() {
     relay_server_info
     echo "==================== 中继服务端配置 ===================="
     echo "当前: 地址=${RS_ADDR:-未设置}  认证=${RS_AUTH:-未设置}  SNI=${RS_SNI:-未设置}"
+    echo ""
+    echo "  1) 从本机服务端节点导入 (自动填 地址+认证+SNI)"
+    echo "  2) 手动输入"
+    read -p "选择 (默认1): " rs_mode || rs_mode="1"
+    if [[ "${rs_mode:-1}" == "1" ]]; then
+        local rn; rn=$(node_pick) || { print_warning "无节点"; return; }
+        local rnf="/etc/hysteria/${rn}.yaml"
+        [[ "$rn" == "default" ]] && rnf="/etc/hysteria/config.yaml"
+        new_addr="127.0.0.1:$(node_get "$rnf" listen 2>/dev/null | head -n1 | sed 's/^[^0-9]*//;s/-.*$//' | tr -d '\"')"
+        new_auth=$(node_get "$rnf" auth 2>/dev/null | head -n1 | tr -d '\"')
+        new_sni=$(node_get "$rnf" masq 2>/dev/null | head -n1 | tr -d '\"')
+        printf "已就绪: 地址=%s 认证=%s SNI=%s (回车往下)\n" "$new_addr" "$new_auth" "$new_sni"
+    else
     echo "(直接回车保持不变)"
     read -p "服务端地址 (IP:端口, 如 1.2.3.4:16680): " new_addr
     read -p "认证密码: " new_auth
@@ -2466,6 +2556,7 @@ relay_server_set() {
     new_addr=${new_addr:-$RS_ADDR}
     new_auth=${new_auth:-$RS_AUTH}
     new_sni=${new_sni:-$RS_SNI}
+    fi
     if [ -z "$new_addr" ] || [ -z "$new_auth" ]; then
         print_error "地址和认证密码不能都为空"
         return
@@ -2475,7 +2566,7 @@ RS_ADDR=$new_addr
 RS_AUTH=$new_auth
 RS_SNI=$new_sni
 EOF
-    print_info "中继服务端已保存: $RELAY_SERVER_CONF"
+    print_info "中继服务端已保存: $RELAY_SERVER_CONF (目标节点: ${rn:-手动输入})"
     print_warning "运行中继前请先执行 '生成客户端中继配置' (选项4)"
 }
 
@@ -2504,9 +2595,11 @@ relay_start() {
     relay_gen_config || { print_error "配置不完整, 无法启动"; return; }
     relay_service_unit
     systemctl daemon-reload
-    systemctl enable --now $RELAY_SERVICE >/dev/null 2>&1
+    # 已运行 => restart 加载最新配置 (enable --now 只会 no-op, 之前漏管道恰恰因为这句)
+    systemctl restart "$RELAY_SERVICE" 2>/dev/null || systemctl enable --now $RELAY_SERVICE >/dev/null 2>&1
+    systemctl enable $RELAY_SERVICE >/dev/null 2>&1
     if systemctl is-active --quiet $RELAY_SERVICE; then
-        print_info "中继客户端已启动 (systemd: $RELAY_SERVICE, 自动加载最新配置)"
+        print_info "中继客户端已运行 (已加载最新配置)"
     else
         print_error "启动失败, 查看: journalctl -u $RELAY_SERVICE -n 30"
     fi
@@ -2584,23 +2677,22 @@ server_menu() {
         echo -e "
   ${GREEN}服务端${PLAIN} (这台机器开放的 HY2 入口)
   ----------------------
-  ${GREEN}1.${PLAIN} 安装 / 重建默认节点
-  ${GREEN}2.${PLAIN} 多节点管理
-  ${GREEN}3.${PLAIN} 修改节点配置
-  ${GREEN}4.${PLAIN} 服务端日志
-  ${GREEN}5.${PLAIN} 服务管理
-  ${GREEN}6.${PLAIN} 查看客户端配置 (Clash / 分享链接)
+  ${GREEN}1.${PLAIN} 多节点管理  (列表 / 新增 / 启停 / 删除 / 导出 / 修改)
+  ${GREEN}2.${PLAIN} 服务端日志
+  ${GREEN}3.${PLAIN} 服务管理
+  ${GREEN}4.${PLAIN} 查看客户端配置 (Clash / 分享链接)
+  ${GREEN}5.${PLAIN} 分流管理 (ACL / 出站)
   ${GREEN}0.${PLAIN} 返回
-  ----------------------"
-        read -p "请输入选项 [0-6]: " sm || { echo "输入被中断, 安全退出"; exit 130; }
+  ----------------------
+  (整机初始化 / 重装 默认节点 在 4.系统与内核 → 2)"
+        read -p "请输入选项 [0-5]: " sm || { echo "输入被中断, 安全退出"; exit 130; }
         case "$sm" in
             0) return ;;
-            1) install_hysteria ;;
-            2) node_menu ;;
-            3) server_edit_config ;;
-            4) server_logs ;;
-            5) server_ctl_menu ;;
-            6) client_menu ;;
+            1) node_menu ;;
+            2) server_logs ;;
+            3) server_ctl_menu ;;
+            4) client_menu ;;
+            5) shunt_menu ;;
             *) print_error "无效的选项" ;;
         esac
         echo && read -p "按回车键继续..." && echo
@@ -2640,7 +2732,7 @@ server_ctl_menu() {
         3)
             local un
             while IFS= read -r un; do
-                [[ -n "$un" ]] || continue
+                [[ "$un" =~ ^hysteria- ]] || continue
                 systemctl restart "$un" 2>/dev/null && print_info "  已重启: $un"
             done < <(systemctl list-units "hysteria-server*" --type=service --no-legend 2>/dev/null | awk '{print $1}')
             print_ok "✓ 全部节点已重启" ;;
@@ -2688,20 +2780,227 @@ diag_menu() {
     done
 }
 
-# 系统与内核
+# ========= 服务端分流 (ACL + Outbounds) =========
+# 语义: 每个节点一份 server.yaml → 分流本来就是"按节点"的粒度
+# 出站类型: direct / socks5 / http (官方协议; 无 HY2-native 出站, 想链 HY2 时用 socks5 接下游 HY2 client)
+shunt_menu() {
+    local sn; sn=$(node_pick) || { print_warning "无节点"; return; }
+    SHUNT_NODE="$sn"
+    local nf="/etc/hysteria/${sn}.yaml"
+    [[ "$sn" == "default" ]] && nf="/etc/hysteria/config.yaml"
+    while true; do
+        echo -e "
+  ${GREEN}分流管理${PLAIN} (节点: $sn)
+  说明: 每个节点一份独立配置, 规则/出站只作用于这个节点; 修改需重启生效
+  ----------------------
+  ${GREEN}1.${PLAIN} 查看当前分流 (出站 + 规则)
+  ${GREEN}2.${PLAIN} 添加 socks5 出站
+  ${GREEN}3.${PLAIN} 添加 http 出站
+  ${GREEN}4.${PLAIN} 添加分流规则
+  ${GREEN}5.${PLAIN} 删除分流规则
+  ${GREEN}6.${PLAIN} 清空此节点分流 (回到 direct 直连)
+  ${GREEN}0.${PLAIN} 返回
+  ----------------------"
+        read -p "请输入选项 [0-6]: " so || { echo "输入被中断, 安全退出"; exit 130; }
+        case "$so" in
+            0) return ;;
+            1) shunt_show "$nf" ;;
+            2) shunt_add_outbound "$nf" socks5 ;;
+            3) shunt_add_outbound "$nf" http ;;
+            4) shunt_add_rule "$nf" ;;
+            5) shunt_del_rule "$nf" ;;
+            6) shunt_clear "$nf" "$sn" ;;
+            *) print_error "无效的选项" ;;
+        esac
+        echo && read -p "按回车键继续..." && echo
+    done
+}
+
+shunt_show() {
+    local nf="$1"
+    python3 - "$nf" <<'PYEOF'
+import sys
+t=open(sys.argv[1]).read()
+m=re.search(r"^outbounds:\n(?:[\t ].*\n)+", t, flags=re.M)
+if not m:
+    print("出站: 无显式定义 (默认 direct 直连)")
+else:
+    print("出站列表:")
+    for ln in m.group(0).splitlines():
+        s=ln.strip()
+        if s.startswith(("name:","type:","addr:","url:","username:")):
+            print("   ", s)
+print()
+m=re.search(r"^acl:\n(?:[\t ].*\n)+", t, flags=re.M)
+if not m:
+    print("规则: (无, 全部走默认出口=direct)")
+else:
+    i=0
+    for ln in m.group(0).splitlines():
+        s=ln.strip()
+        if s.startswith("- "):
+            i+=1
+            print(f"  [{i}] {s[2:]}")
+PYEOF
+}
+
+shunt_add_outbound() {
+    # $1=yaml  $2=type(socks5/http)
+    local nf="$1" typ="$2" name addr usr pwd url
+    if [[ "$typ" == "socks5" ]]; then
+        print_info "预设 socks01: 127.0.0.1:33934 用户 DfD42wmG (直接回车即用此预设)"
+    fi
+    printf "出口名称: "
+    read -r name || return 130
+    name=$(echo "$name" | xargs)
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { print_error "名称只能用字母数字_-"; return; }
+    if [[ "$typ" == "socks5" ]]; then
+        printf "SOCKS 服务地址 (回车=默认 127.0.0.1:33934): "
+        read -r addr || return 130
+        addr=$(echo "${addr:-127.0.0.1:33934}" | xargs)
+        printf "用户名: "
+        read -r usr || return 130
+        printf "密码: "
+        read -r pwd || return 130
+    else
+        printf "HTTP 代理 URL (例: http://user:pass@1.2.3.4:8080): "
+        read -r url || return 130
+        url=$(echo "$url" | xargs)
+    fi
+    python3 - "$nf" "$name" "$typ" "$addr" "$usr" "$pwd" "$url" <<'PYEOF'
+import re, sys
+p,name,typ = sys.argv[1:4]
+addr,usr,pwd,url = sys.argv[4:8]
+t=open(p).read()
+lines=[]
+lines.append(f"  - name: {name}")
+lines.append(f"    type: {typ}")
+lines.append(f"    {typ}:")
+if typ=="socks5":
+    lines.append(f"      addr: {addr}")
+    if usr: lines.append(f"      username: {usr}")
+    if pwd: lines.append(f"      password: {pwd}")
+else:
+    lines.append(f"      url: {url}")
+block="\n".join(lines)+"\n"
+m=re.search(r"^outbounds:\n(?:[\t ].*\n)+", t, flags=re.M)
+if m:
+    t=t[:m.end()] + block + t[m.end():]
+else:
+    t=t.rstrip()+"\n\noutbounds:\n"+block
+open(p,"w").write(t)
+PYEOF
+    print_ok "✓ 已写入出站 $name ($typ)"
+    print_info "⚠ 没有分流到该出口的请求统一走第一个 outbounds 列表项作为默认;"
+    print_info "  若只想分流部分站点而剩余直连, 请在规则里加一行 direct(all) 且放在其它规则之后"
+    shunt_apply "$nf"
+}
+
+shunt_add_rule() {
+    local nf="$1" rule sr1
+    echo "  1) reject(geoip:cn)        拒绝中国 IP"
+    echo "  2) direct(geoip:cn)        中国 IP 直连"
+    echo "  3) 自由填写 (例: socks01(suffix:example.com))"
+    read -p "选择: " sr1 || return 130
+    case "$sr1" in
+        1) rule='reject(geoip:cn)' ;;
+        2) rule='direct(geoip:cn)' ;;
+        3) read -r -p "规则: " rule || return 130 ;;
+        *) print_error "无效"; return ;;
+    esac
+    rule=$(echo "$rule" | xargs)
+    sane=$(printf "%s" "$rule" | tr -d '()?:/' )
+    python3 -c "import re,sys; sys.exit(0 if re.fullmatch(r'[A-Za-z0-9_-]+\\([^)]*\\)', '$rule') else 1)" || { print_error "规则格式不对, 应形如 出口(地址)"; return; }
+    python3 - "$nf" "$rule" <<'PYEOF'
+import re, sys
+p, rule = sys.argv[1:3]
+t=open(p).read()
+m=re.search(r"^(acl:\n(?:(?!  inline:).*\n)*  inline:\n)((?:[\t ]+.*\n)*)", t, flags=re.M|re.S)
+if m:
+    t=t[:m.end(2)] + f"    - {rule}\n" + t[m.end(2):]
+else:
+    t=t.rstrip()+"\n\nacl:\n  inline:\n"+f"    - {rule}\n"
+open(p,"w").write(t)
+PYEOF
+    shunt_apply "$nf"
+}
+
+shunt_del_rule() {
+    local nf="$1" dn
+    read -p "要删除的规则编号: " dn || return 130
+    [[ "$dn" =~ ^[0-9]+$ ]] || { print_error "编号必须是数字"; return; }
+    python3 - "$nf" "$dn" <<'PYEOF'
+import re, sys
+p, n = sys.argv[1:3]
+n=int(n)
+t=open(p).read()
+m=re.search(r"^acl:\n(?:[\t ].*\n)+", t, flags=re.M)
+rows=m.group(0).splitlines(keepends=True)
+i=0; kept=[]
+for ln in rows:
+    if ln.lstrip().startswith("- "):
+        i+=1
+        if i==n: continue
+    kept.append(ln)
+t=t.replace(m.group(0), "".join(kept))
+open(p,"w").write(t)
+PYEOF
+    shunt_apply "$nf"
+}
+
+shunt_apply() {
+    local nf="$1" sn="${2:-$SHUNT_NODE}"
+    local un="hysteria-server@${sn}.service"; [[ "$sn" == "default" ]] && un="hysteria-server.service"
+    if validate_node_cfg "$nf"; then
+        systemctl restart "$un" && print_ok "✓ 已重启, 分流生效 (节点 $sn)"
+    else
+        print_error "✗ 配置验证失败, 未重启"
+    fi
+}
+
+shunt_clear() {
+    local nf="$1" sn="$2"
+    python3 - "$nf" <<'PYEOF'
+import re, sys
+p=sys.argv[1]
+t=open(p).read()
+t=re.sub(r"^acl:\n(?:[\t ].*\n)+","",t,flags=re.M)
+t=re.sub(r"^outbounds:\n(?:[\t ].*\n)+","",t,flags=re.M)
+t=re.sub(r"\n\n\n","\n\n",t)
+open(p,"w").write(t.rstrip()+"\n")
+PYEOF
+    print_ok "✓ 已将节点 $sn 回到纯 direct 直连 (删了 acl + outbounds)"
+    shunt_apply "$nf"
+}
+
+# (sys_kernel_menu 在此之下)
+
+sys_kernel_version() {
+    if command -v hysteria >/dev/null 2>&1; then
+        echo "  内核路径 : $(command -v hysteria)"
+        local kv; kv=$(hysteria version 2>/dev/null | grep -a "^Version" | head -1 | tr -d "\t")
+        echo "  内核版本 : ${kv#Version:}  (主机底层)"
+    else
+        print_warning "未安装内核; 可在 3.整机初始化 安装"
+    fi
+}
+
 sys_kernel_menu() {
     echo -e "
   ${GREEN}系统与内核${PLAIN}
   ----------------------
-  ${GREEN}1.${PLAIN} 更新服务端内核 (所有节点会一并重启)
-  ${GREEN}2.${PLAIN} 卸载全部 (危险)
-  ${GREEN}3.${PLAIN} 客户端内核安装 / 更新
-  ${GREEN}0.${PLAIN} 返回"
-    read -p "请输入选项 [0-3]: " km || { echo "输入被中断, 安全退出"; exit 130; }
+  ${GREEN}1.${PLAIN} 内核安装 / 升级 (同时会重启全部节点)
+  ${GREEN}2.${PLAIN} 核查内核版本
+  ${GREEN}3.${PLAIN} 整机初始化 / 重装 (装内核 + 默认节点, 覆盖式)
+  ${GREEN}4.${PLAIN} 卸载全部 (危险)
+  ${GREEN}0.${PLAIN} 返回
+  (客户端内核在 2.客户端 → 7.内核管理)"
+    read -p "请输入选项 [0-4]: " km || { echo "输入被中断, 安全退出"; exit 130; }
     case "$km" in
         1) update_hysteria ;;
-        2) uninstall_hysteria ;;
-        3) client_kernel_install ;;
+        2) sys_kernel_version ;;
+        3) install_hysteria ;;
+        4) uninstall_hysteria ;;
     esac
 }
 
@@ -3140,10 +3439,10 @@ show_menu() {
     echo -e "
   ${GREEN}Hysteria 2 管理面板${PLAIN}
   ============================
-  ${GREEN}1.${PLAIN} 服务端        (安装 / 多节点 / 日志)
-  ${GREEN}2.${PLAIN} 客户端        (节点 / 当前节点设置 / 诊断)
+  ${GREEN}1.${PLAIN} 服务端        (多节点 / 分流 / 日志)
+  ${GREEN}2.${PLAIN} 客户端        (节点 / 当前节点设置 / 中继)
   ${GREEN}3.${PLAIN} 状态与诊断
-  ${GREEN}4.${PLAIN} 系统与内核    (内核更新 / 卸载)
+  ${GREEN}4.${PLAIN} 系统与内核    (内核更新 / 整机初始化)
   ${GREEN}0.${PLAIN} 退出
   ----------------------
   服务端状态: ${hysteria_server_status_text}
