@@ -17,6 +17,126 @@ CORE_ARCH=$(arch)
 # 配置目录 (在 /root/catmi 下为本脚本单独建立)
 INSTALL_DIR="/root/catmi/hy2"
 
+# =========================================================
+# 带宽参数 (唯一持久化默认值源; 单位 Mbps, 数值型)
+# 语义: CLIENT_BW_(UP|DOWN) = 客户端角度
+#   CLIENT_BW_UP   = 客户端 → 服务端   (官方: client.up; 同时 = server.down)
+#   CLIENT_BW_DOWN = 服务端 → 客户端   (官方: client.down; 同时 = server.up)
+# 服务端 bandwidth 仅在用户显式开启 CLIENT_AS_SERVER_LIMIT=true 时生成
+# 并按方向换算写入 (server.up=CLIENT_BW_DOWN, server.down=CLIENT_BW_UP)。
+# 持久化: $INSTALL_DIR/bw.env, 面板主菜单 'b' 修改; 0 表示该方向不设置/不限速。
+# ============================================================
+BW_ENV_FILE="${BW_ENV_FILE:-$INSTALL_DIR/bw.env}"
+CLIENT_BW_UP=${CLIENT_BW_UP:-45}
+CLIENT_BW_DOWN=${CLIENT_BW_DOWN:-150}
+CLIENT_AS_SERVER_LIMIT=${CLIENT_AS_SERVER_LIMIT:-false}
+load_bw_env() {
+    [[ -f "$BW_ENV_FILE" ]] && . "$BW_ENV_FILE"
+    # 防呆: 数值非法时回落默认 (高级场景可直接手改 bw.env)
+    echo "${CLIENT_BW_UP:-}" | grep -qE '^[0-9]+(\.[0-9]+)?$' || CLIENT_BW_UP=45
+    echo "${CLIENT_BW_DOWN:-}" | grep -qE '^[0-9]+(\.[0-9]+)?$' || CLIENT_BW_DOWN=150
+}
+save_bw_env() {
+    mkdir -p "$(dirname "$BW_ENV_FILE")"
+    cat > "$BW_ENV_FILE" <<EOF
+# 面板带宽默认值 (单位 Mbps; 0=该方向不设置). 上一轮编辑: $(date +"%F %T")
+CLIENT_BW_UP=${CLIENT_BW_UP}
+CLIENT_BW_DOWN=${CLIENT_BW_DOWN}
+CLIENT_AS_SERVER_LIMIT=${CLIENT_AS_SERVER_LIMIT}
+SRV_IGNORE_CBW_ON=${SRV_IGNORE_CBW_ON:-false}
+EOF
+    chmod 600 "$BW_ENV_FILE" 2>/dev/null
+}
+
+# ================================
+# 带宽参数菜单 (主菜单 b)
+# 语义: 这里输入的是 CLIENT 带宽 (client.up / client.down, 官方方向)
+#   client.up   = 客户端→服务端 = server.down
+#   client.down = 服务端→客户端 = server.up
+# 只作为"新生成的配置/链接/订阅"的默认值; 已有节点需在客户端面板重导入生效。
+# ============================================================
+bw_menu() {
+    load_bw_env
+    echo ""
+    echo "${GREEN}客户端带宽默认值${PLAIN} ────────────"
+    echo ""
+    echo "当前默认值"
+    echo "  上传 : ${CLIENT_BW_UP} Mbps"
+    echo "  下载 : ${CLIENT_BW_DOWN} Mbps"
+    echo "  同时写入服务端限速 : ${CLIENT_AS_SERVER_LIMIT}"
+    echo ""
+    echo "说明 : 用于以后新增/导入节点的默认带宽; 已有节点不受影响。"
+    echo "       上方数字=这台设备向服务器申报的最大带宽, 宁小勿大。"
+    echo "       对应方向填了非 0 数字才会启用 Brutal; 0 = 该方向普通 BBR。"
+    echo ""
+    echo "${GREEN}1.${PLAIN} 修改上传带宽"
+    echo "${GREEN}2.${PLAIN} 修改下载带宽"
+    echo "${GREEN}3.${PLAIN} 恢复默认值 (45 / 150)"
+    echo "${GREEN}4.${PLAIN} 应用到当前节点"
+    echo "${GREEN}0.${PLAIN} 返回"
+    echo ""
+    read -p "请输入选项 [0-4]: " bwop || { echo "输入被中断, 安全退出"; exit 130; }
+    case "$bwop" in
+        0) return ;;
+        1)
+            read -p "上传 Mbps (0=不设置, 回车保留 ${CLIENT_BW_UP}): " u || return 130
+            u=$(echo "${u:-}" | xargs); [[ -z "$u" ]] && u=$CLIENT_BW_UP
+            echo "$u" | grep -qE '^[0-9]+(\.[0-9]+)?$' || { print_error "数字无效 (例如 100 或 45.5, 0=不设置)"; return 1; }
+            CLIENT_BW_UP="$u" ;;
+        2)
+            read -p "下载 Mbps (0=不设置, 回车保留 ${CLIENT_BW_DOWN}): " d || return 130
+            d=$(echo "${d:-}" | xargs); [[ -z "$d" ]] && d=$CLIENT_BW_DOWN
+            echo "$d" | grep -qE '^[0-9]+(\.[0-9]+)?$' || { print_error "数字无效"; return 1; }
+            CLIENT_BW_DOWN="$d" ;;
+        3) CLIENT_BW_UP=45; CLIENT_BW_DOWN=150 ;;
+        4) bw_apply_to_current; return ;;
+        *) print_error "无效的选项"; return ;;
+    esac
+    read -p "同时写入服务端限速 (当前 ${CLIENT_AS_SERVER_LIMIT}, y/N): " sl || sl=""
+    case "$(echo "${sl:-}" | xargs | tr 'A-Z' 'a-z')" in
+        y|yes) CLIENT_AS_SERVER_LIMIT=true ;;
+        n|no) CLIENT_AS_SERVER_LIMIT=false ;;
+        *) : ;;
+    esac
+    if [[ "$CLIENT_AS_SERVER_LIMIT" == "true" ]]; then
+        read -p "服务端忽略客户端带宽提示 (当前 ${SRV_IGNORE_CBW_ON:-false}, y/N): " icbw || icbw=""
+        case "$(echo "${icbw:-}" | xargs | tr 'A-Z' 'a-z')" in
+            y|yes) SRV_IGNORE_CBW_ON=true ;;
+            n|no) SRV_IGNORE_CBW_ON=false ;;
+            *) : ;;
+        esac
+    fi
+    save_bw_env
+    print_ok "✓ 已保存: 上传 ${CLIENT_BW_UP} / 下载 ${CLIENT_BW_DOWN} Mbps"
+    print_info "生效范围: 以后新建/导入的节点; 已有节点请用『4. 应用到当前节点』或客户端→当前节点设置"
+}
+
+# 把 bw.env 默认带宽写入当前客户端节点 (current.yaml), 可选立即重启
+bw_apply_to_current() {
+    [[ -f "${CLIENT_DIR}/current.yaml" ]] || { print_warning "本机还没有导入任何节点, 无契约可应用"; return; }
+    python3 - "${CLIENT_DIR}/current.yaml" "${CLIENT_BW_UP}" "${CLIENT_BW_DOWN}" <<'PYEOF'
+import re,sys
+p,u,d=sys.argv[1],sys.argv[2],sys.argv[3]
+t=open(p).read()
+t=re.sub(r"^bandwidth:\n(?:[ \t].*\n)+","",t,flags=re.M)
+t=re.sub(r"\n\n\n","\n\n",t)
+u=u if float(u)>0 else ""
+d=d if float(d)>0 else ""
+if u or d:
+    lines="bandwidth:\n"
+    if u: lines+=f"  up: {u} mbps\n"
+    if d: lines+=f"  down: {d} mbps\n"
+    t=t.rstrip()+"\n\n"+lines
+open(p,"w").write(t)
+PYEOF
+    print_ok "✓ 已把默认带宽应用到当前节点 (${CLIENT_BW_UP}/${CLIENT_BW_DOWN} Mbps)"
+    read -p "是否立即重启客户端使生效? (y/N): " ap || ap="n"
+    case "$(echo "${ap:-n}" | xargs | tr 'A-Z' 'a-z')" in
+        y) systemctl restart hysteria-client.service && print_ok "✓ 客户端已重启, 带宽已生效" ;;
+        *) print_info "未重启; 带宽已写入 current.yaml, 请自行在客户端→4 重启" ;;
+    esac
+}
+
 # 伪装域名候选列表 (内置 4 个, 可选自定义或回车随机)
 MASQ_DOMAINS=("bing.com" "cloudflare.com" "microsoft.com" "apple.com")
 
@@ -32,7 +152,7 @@ show_banner() {
 EOF
     echo -e "${GREEN}System: ${PLAIN}${SYSTEM_NAME}"
     echo -e "${GREEN}Architecture: ${PLAIN}${CORE_ARCH}"
-    echo -e "${GREEN}Version: ${PLAIN}2.1.0 (multi-node + client + status)"
+    echo -e "${GREEN}Version: ${PLAIN}2.1.6 (multi-node + client + status + bw-v2)"
     echo -e "----------------------------------------"
 }
 
@@ -64,19 +184,33 @@ PYEOF
 
 # 生成端口的函数
 generate_port() {
-    local protocol="$1" user_input port udp_used tcp_used
-    udp_used=$(ss -ulHn 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un)
+    local protocol="$1" user_input port udp_used
+    # 注意: 本函数 stdout 只允许出现最终端口号; 任何提示一律走 stderr (历史 bug: 提示被 command substitution 写进 listen)
+    udp_used=$(ss -ulHn 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un; grep -h '^listen:' /etc/hysteria/*.yaml 2>/dev/null | sed 's/[^0-9-]/ /g' | tr ' -' '\n' | grep -E '^[0-9]+$' | sort -un)
     tcp_used=$(ss -tlHn 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un)
     while :; do
         port=$((RANDOM % 10001 + 10000))
         read -p "请为 ${protocol} 输入监听端口(默认为随机生成): " user_input
-        port=${user_input:-$port}
-        if echo "$udp_used" | grep -qE "^${port}$" || echo "$tcp_used" | grep -qE "^${port}$"; then
-            echo "端口 $port 被占用(TCP/UDP), 请输入其他端口; 若是现有 hysteria 节点占用, 可用 '菜单2卸载' 或手动 systemctl stop hysteria-server 释放"
+        port=$(echo "${user_input:-$port}" | xargs | tr -d '"')
+        if ! echo "$port" | grep -qE '^[0-9]+$'; then
+            echo "端口应为纯数字 (1-65535), 例如 45131; 你输入的是 '$port'" >&2
+            continue
+        fi
+        if (( port < 1 || port > 65535 )); then
+            echo "端口越界 (1-65535): $port" >&2
+            continue
+        fi
+        if echo "$udp_used" | grep -qE "^${port}$"; then
+            echo "UDP 端口 $port 已被其它程序占用了, 请换一个" >&2
+            continue
+        fi
+        if echo "$tcp_used" | grep -qE "^${port}$"; then
+            echo "TCP 端口 $port 已被占用 (HY2 只用 UDP, 一般可忽略; 建议另选端口避免误导)" >&2
             continue
         fi
         echo "$port"; return 0
     done
+    return 1
 }
 
 # 选择伪装域名 (内置列表 / 自定义 / 回车随机) -> 全局 MASQ_DOMAIN
@@ -490,6 +624,158 @@ ask_ech() {
     return 0
 }
 
+# ========= 证书密钥类型检查 (chrome parrot 兼容性: RSA/ECDSA ok, Ed25519 警告) =========
+cert_key_type() {
+    local crt="$1" out
+    command -v openssl >/dev/null 2>&1 || { echo "unknown"; return; }
+    out=$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | openssl pkey -pubin -text -noout 2>/dev/null)
+        if echo "$out" | grep -qi "ED25519"; then echo "ed25519"
+    elif echo "$out" | grep -qiE "ASN1 OID: (prime|secp|P-)"; then echo "ecdsa"
+    elif echo "$out" | grep -qE "(Private|Public)-Key: \([0-9]+ bit\)|RSA (Public|PRIVATE)"; then echo "rsa"
+    else echo "unknown"
+    fi
+}
+
+# ========= 带宽输入: 接受 bps/kbps/mbps/gbps (1000 进制, 官方语义), 空为未设置 =========
+bw_read_field() { # $1=字段名(Up_BAND/…) $2=提示默认值
+    local v
+    printf "%s (如 100 mbps / 2 gbps / 500000 kbps, 直接回车=不设置): " "$1" >&2
+    if ! read -r v; then return 1; fi
+    v=$(echo "$v" | tr 'A-Z' 'a-z' | xargs)
+    if [[ -z "$v" ]]; then echo ""; return 0; fi
+    if [[ -z $(echo "$v" | tr -d ' ') ]] || ! echo "$v" | grep -qE '^[0-9]+(\.[0-9]+)? ?(bps|kbps|mbps|gbps)$'; then
+        print_error "格式无效: $v (应为 数字 + bps/kbps/mbps/gbps)"; bw_read_field "$1" "$2"; return 0
+    fi
+    echo "$v"
+}
+
+# ========= 服务端: 拥塞控制 + bandwidth (v2.8.0 语义, 实测内核 v2.12.3) =========
+# 内核支持 congestion.type: bbr|reno; brutal 不是 type —— 设置 bandwidth 后默认使用 Brutal 算法
+# 输出全局: SRV_CC (default|bbr|reno), SRV_BBR_PROFILE, SRV_BW_UP, SRV_BW_DOWN, SRV_IGNORE_CBW, SRV_DISABLE_LOSSCOMP
+ask_srv_congestion() {
+    SRV_CONGESTION="default" SRV_BBR_PROFILE="" SRV_BW_UP="" SRV_BW_DOWN="" SRV_IGNORE_CBW=false SRV_DISABLE_LOSSCOMP=false
+    local c
+    echo "  限速/拥塞方式 (不熟悉就选 1 默认):" >&2
+    echo "  1) 默认/自动 (有 bandwidth=Brutal, 无=BBR)" >&2
+    echo "  2) BBR (可带 profile)" >&2
+    echo "  3) Reno" >&2
+    printf "  选择 (默认1): " >&2
+    read -r c || return 1
+    c=$(clean_input2 "$c")
+    case "$c" in
+        2) SRV_CONGESTION="bbr"
+           local pf
+           printf "  BBR profile: 1) standard 2) conservative 3) aggressive (默认1): " >&2
+           read -r pf || pf=""
+           case "$(clean_input2 "$pf")" in ""|1) SRV_BBR_PROFILE="standard";; 2) SRV_BBR_PROFILE="conservative";; 3) SRV_BBR_PROFILE="aggressive";; *) SRV_BBR_PROFILE="standard";; esac
+           ;;
+        3) SRV_CONGESTION="reno" ;;
+        *) SRV_CONGESTION="default" ;;
+    esac
+    local yn
+    printf "  设置服务端 bandwidth (up/down)? (默认: 否, y/N): " >&2
+    read -r yn || return 0
+    case "$(clean_input2 "$yn")" in y|Y)
+        SRV_BW_UP=$(bw_read_field "  Upload") || return 0
+        [[ -z "$SRV_BW_UP" ]] && { print_warning "bandwidth 需同时设置 up/down, 已跳过"; return 0; }
+        SRV_BW_DOWN=$(bw_read_field "Download (注意: 与客户端 up 相对)") || return 0
+        [[ -z "$SRV_BW_DOWN" ]] && { print_warning "bandwidth 需同时设置 up/down, 已跳过"; return 0; }
+        printf "  ignoreClientBandwidth (忽略客户端带宽提示)? (y/N): " >&2
+        read -r yn || return 0
+        case "$(clean_input2 "$yn")" in y|Y) SRV_IGNORE_CBW=true; print_info "已设置: 客户端 bandwidth 提示将被忽略 (BTW: 官方语义 server_bw.down 决定客户端 down)";;
+            *) SRV_IGNORE_CBW=false;; esac
+        printf "  Brutal Loss Compensation? 1) Enabled(默认) 2) Disabled: " >&2
+        read -r yn || return 0
+        case "$(clean_input2 "$yn")" in 2) SRV_DISABLE_LOSSCOMP=true;; *) SRV_DISABLE_LOSSCOMP=false;; esac
+        ;;
+    esac
+}
+
+# ========= 客户端: bandwidth + 拥塞 + Chrome Parrot (写入 current.yaml 或导入) =========
+# 输出全局: CLI_CONGESTION, CLI_BBR_PROFILE, CLI_BW_UP, CLI_BW_DOWN, CLI_DISABLE_LOSSCOMP, CHROME_PARROT_ON
+ask_cli_traffic() {
+    load_bw_env
+    CLI_CONGESTION="default" CLI_BBR_PROFILE="" CLI_BW_UP="" CLI_BW_DOWN="" CHROME_PARROT_ON=true
+    local c yn
+    echo "  客户端拥塞控制 (默认/自动: 有 bandwidth=Brutal; 内核 type 仅 bbr/reno):" >&2
+    echo "  1) 默认/自动  2) BBR (带 profile)  3) Reno" >&2
+    printf "  选择 (默认1): " >&2
+    read -r c || return 1
+    case "$(clean_input2 "$c")" in
+        2) CLI_CONGESTION="bbr"
+           printf "  BBR profile: 1) standard 2) conservative 3) aggressive (默认1): " >&2
+           read -r c || return 1
+           case "$(clean_input2 "$c")" in 2) CLI_BBR_PROFILE="conservative";; 3) CLI_BBR_PROFILE="aggressive";; *) CLI_BBR_PROFILE="standard";; esac ;;
+        3) CLI_CONGESTION="reno" ;;
+    esac
+    local yn
+    printf "  设置客户端 bandwidth (up/down)? (默认: 不显式设置, 由服务端协商; y/N): " >&2
+    read -r yn || return 0
+    case "$(clean_input2 "$yn")" in y|Y)
+        printf "  Upload (客户端 up, 默认 %s Mbps, 回车保留): " "$CLIENT_BW_UP" >&2
+        CLI_BW_UP=$(bw_read_field "Upload" "") || CLI_BW_UP=$CLIENT_BW_UP
+        [[ -z "$CLI_BW_UP" ]] && CLI_BW_UP=$CLIENT_BW_UP
+        printf "  Download (客户端 down, 默认 %s Mbps, 回车保留): " "$CLIENT_BW_DOWN" >&2
+        CLI_BW_DOWN=$(bw_read_field "Download" "") || CLI_BW_DOWN=$CLIENT_BW_DOWN
+        [[ -z "$CLI_BW_DOWN" ]] && CLI_BW_DOWN=$CLIENT_BW_DOWN
+        printf "  Brutal Loss Compensation? 1) Enabled(默认) 2) Disabled: " >&2
+        read -r yn || return 0
+        case "$(clean_input2 "$yn")" in 2) CLI_DISABLE_LOSSCOMP=true;; *) CLI_DISABLE_LOSSCOMP=false;; esac
+        ;;
+    esac
+}
+
+cli_traffic_block() { # 生成 client yaml 增量块 (bandwidth/congestion/quic.disableChromeParrot)
+    local up="$CLI_BW_UP" down="$CLI_BW_DOWN" lc="$CLI_DISABLE_LOSSCOMP"
+    local out=""
+    if [[ -n "$up" || -n "$down" ]]; then
+        out+="bandwidth:"
+        [[ -n "$up" ]] && out+=$'\n  up: '"$up"
+        [[ -n "$down" ]] && out+=$'\n  down: '"$down"
+        [[ "$lc" == "true" ]] && out+=$'\n  disableLossCompensation: true'
+    fi
+    if [[ "$CLI_CONGESTION" != "default" ]]; then
+        out+=$'\n\ncongestion:\n  type: '"$CLI_CONGESTION"
+        [[ -n "$CLI_BBR_PROFILE" && "$CLI_CONGESTION" == "bbr" ]] && out+=$'\n  profile: '"$CLI_BBR_PROFILE"
+    fi
+    if [[ "$CHROME_PARROT_ON" != "true" ]]; then
+        out+=$'\n\nquic:\n  disableChromeParrot: true'
+    fi
+    printf "%s" "$out"
+}
+
+
+# 生成服务端 bandwidth/congestion yaml 块 (依据 ask_srv_congestion 取好的全局值)
+srv_cc_block() {
+    local out=""
+    # "同时写入服务端限速" 模式 (bw_menu 开启 CLIENT_AS_SERVER_LIMIT 且本节点未手动设服务端 bw):
+    # 按官方方向换算自动生成 (server.up = client.down, server.down = client.up)
+    if [[ -z "$SRV_BW_UP" && "${CLIENT_AS_SERVER_LIMIT:-false}" == "true" && "$CLIENT_BW_UP" != 0 && "$CLIENT_BW_UP" != 0.0 && "$CLIENT_BW_DOWN" != 0 && "$CLIENT_BW_DOWN" != 0.0 ]]; then
+        SRV_BW_UP="${CLIENT_BW_DOWN} mbps"
+        SRV_BW_DOWN="${CLIENT_BW_UP} mbps"
+        SRV_IGNORE_CBW="${SRV_IGNORE_CBW_ON:-false}"
+    fi
+    if [[ -n "$SRV_BW_UP" ]]; then
+        out="bandwidth:
+  up: ${SRV_BW_UP}
+  down: ${SRV_BW_DOWN}"
+        [[ "$SRV_IGNORE_CBW" == "true" ]] && out+='
+  ignoreClientBandwidth: true'
+        [[ "$SRV_DISABLE_LOSSCOMP" == "true" ]] && out+='
+  disableLossCompensation: true'
+    fi
+    if [[ "$SRV_CONGESTION" != "default" ]]; then
+        [[ -n "$out" ]] && out+='
+
+'
+        out+="congestion:
+  type: ${SRV_CONGESTION}"
+        [[ "$SRV_CONGESTION" == "bbr" && -n "$SRV_BBR_PROFILE" ]] && out+='
+  profile: '"${SRV_BBR_PROFILE}"
+    fi
+    printf "%s" "$out"
+}
+
 # 生成自签证书 (CN 与伪装域名一致)
 gen_selfsigned_cert() {
     local domain="$1"
@@ -546,7 +832,10 @@ install_hysteria() {
     mkdir -p "$INSTALL_DIR"
 
     # 安装依赖
-    bash <(curl -fsSL https://get.hy2.sh/)
+    if ! bash <(curl -fsSL --max-time 120 https://get.hy2.sh/); then
+    print_error "内核安装失败 (网络不通或安装源异常), 已中止配置生成; 请检查网络后重试"
+    return 1
+  fi
 
     # 选择伪装域名
     select_masq_domain
@@ -567,6 +856,8 @@ install_hysteria() {
     ask_port_hopping      # 可选: hysteria 原生端口区间监听
     ask_obfs              # 可选: salamander 混淆
     ask_ech               # 可选: ECH (需 hysteria >= 2.12.3)
+    echo ""
+    ask_srv_congestion    # 拥塞控制 / 服务端 bandwidth (v2.8.0+ 语义)
 
     # 获取公网 IP 地址
     PUBLIC_IP_V4=$(curl -s https://api.ipify.org)
@@ -674,6 +965,8 @@ masquerade:
     rewriteHost: true
 $OBFS_BLOCK
 $ECH_BLOCK
+$(srv_cc_block
+)
 quic:
   initStreamReceiveWindow: 8388608 
   maxStreamReceiveWindow: 8388608 
@@ -720,9 +1013,15 @@ create_client_config() {
     # ECH (仅官方 hysteria 客户端; mihomo/v2rayN 不识别)
     local ech_note="" ech_link=""
     if [[ "$ECH_ENABLED" == "true" && -n "$ECH_CONFIG" ]]; then
-        ech_link="&ech=$ECH_CONFIG"
+        ech_link="&ech=$(uri_encode "$ECH_CONFIG")"
         ech_note="   注意: ECH 仅官方 hysteria 客户端支持, mihomo/v2rayN 等不识别该参数"
     fi
+    # bandwidth (server bandwidth.up/down ↔ 客户端 up/down 互换, v2.8.0 协商语义)
+    load_bw_env
+    local bw_up_cl="$CLIENT_BW_UP" bw_dn_cl="$CLIENT_BW_DOWN"
+    [[ -n "$SRV_BW_UP" && -n "$SRV_BW_DOWN" ]] && {
+        bw_up_cl="${SRV_BW_DOWN% *}"; bw_dn_cl="${SRV_BW_UP% *}"
+    }
 
     cat << EOF > "$INSTALL_DIR/config.yaml"
 
@@ -730,8 +1029,8 @@ create_client_config() {
     server: $PUBLIC_IP
     port: $PORT
     type: hysteria2
-    up: "45 Mbps"
-    down: "150 Mbps"
+    up: "$bw_up_cl Mbps"
+    down: "$bw_dn_cl Mbps"
     sni: $sni
     password: $AUTH_PASSWORD
 $fp_lines
@@ -741,7 +1040,7 @@ $obfs_lines
       - h3
 
 **********************************************************************************************************************
-   hysteria2://$(uri_encode "$AUTH_PASSWORD")@$PUBLIC_IP:$PORT?$insecure&sni=${sni}&alpn=h3&$link_obfs&upmbps=45&downmbps=150${PIN_PART}${ech_link}#HY2
+   hysteria2://$(uri_encode "$AUTH_PASSWORD")@$PUBLIC_IP:$PORT?$insecure&sni=${sni}&alpn=h3&$link_obfs&upmbps=$bw_up_cl&downmbps=$bw_dn_cl${PIN_PART}${ech_link}#HY2
 $ech_note
 
 EOF
@@ -762,7 +1061,14 @@ ensure_node_dirs() {
 }
 
 sanitize_node_name() {
-    echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | cut -c1-24
+    local nm="$1"
+    nm=$(echo "$nm" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | cut -c1-24)
+    case "$nm" in
+        ""|config|default|hysteria|server)
+            echo "__illegal__"
+            return;;
+    esac
+    echo "$nm"
 }
 
 # 节点名列表 (default 恒在首位)
@@ -793,6 +1099,9 @@ node_get() {
         masq)     awk '/url: https:\/\//{print $2; exit}' "$f" | cut -d/ -f3;;
         obfs_pw)  awk '/^obfs:/{f=1;next} f&&/^  salamander:/{g=1;next} g&&/^    password:/{print $2; exit} /^quic:|^ech:/{f=0;g=0}' "$f";;
         ech_key)  awk '/^ech:/{f=1;next} f&&/^  keyPath:/{print $2; exit}' "$f";;
+        bw_up)    awk '/^bandwidth:/{f=1;next} f&&/^  up:/{print $2, $3; exit} f&&/^[a-z]/&&!/bandwidth/{exit}' "$f" | tr -d '"' ;;
+        bw_down)  awk '/^bandwidth:/{f=1;next} f&&/^  down:/{print $2, $3; exit}' "$f" ;;
+        bw_ign)   awk '/^bandwidth:/{f=1} f&&/^  ignoreClientBandwidth:/{print $3; exit}' "$f" ;;
         listen_clean) node_get "$f" listen | tr -d ':" ';;
     esac
 }
@@ -876,6 +1185,35 @@ node_export_client() {
         [[ -n "$pinhex" ]] && pin_field="  pinSHA256: ${pinhex}"
     fi
 
+        local authp
+    authp=$(node_get "$sf" auth 2>/dev/null | tr -d '"')
+    if [[ -z "$authp" ]]; then
+        print_error "节点 auth 缺失 (yaml 被手工改坏?), 拒绝导出分享链接 — 请先恢复配置"
+        return 1
+    fi
+# 带宽 (mihomo up/down + 链接 upmbps/downmbps): 方向取“客户端 up / down" (服务器 up → 客户客户端 down 的对偶)
+    load_bw_env
+    local bw_up_note bw_dn_note bw_lines_mihomo
+    if node_get "$sf" bw_ign 2>/dev/null | grep -q true; then
+        bw_up_note="ignoreClientBandwidth=true 生效时, 链接带宽仅参考 (服务端忽略 client 提示)"
+    fi
+    local srv_bw_up srv_bw_down
+    srv_bw_up=$(node_get "$sf" bw_up 2>/dev/null | tr -d '":')
+    srv_bw_down=$(node_get "$sf" bw_down 2>/dev/null | tr -d '":')
+    if [[ -n "$srv_bw_up" && -n "$srv_bw_down" ]]; then
+        bw_up_cl="${srv_bw_down% *}"    # server.down → client.up   (官方方向对偶)
+        bw_dn_cl="${srv_bw_up% *}"      # server.up   → client.down
+    else
+        load_bw_env
+        CLIENT_BW_UP="${CLIENT_BW_UP:-0}"; CLIENT_BW_DOWN="${CLIENT_BW_DOWN:-0}"
+        if [[ "$CLIENT_BW_UP" != "0" && "$CLIENT_BW_UP" != "0.0" ]]; then bw_up_cl="$CLIENT_BW_UP"; else bw_up_cl=""; fi
+        if [[ "$CLIENT_BW_DOWN" != "0" && "$CLIENT_BW_DOWN" != "0.0" ]]; then bw_dn_cl="$CLIENT_BW_DOWN"; else bw_dn_cl=""; fi
+    fi
+    if [[ -n "$bw_up_cl" && -n "$bw_dn_cl" ]]; then
+        bw_lines_mihomo=$(printf '    up: "%s Mbps"\n    down: "%s Mbps"' "$bw_up_cl" "$bw_dn_cl")
+    else
+        bw_lines_mihomo=""
+    fi
     local hop_lines="" mport_param=""
     if $is_range; then
         hop_lines="transport:
@@ -903,6 +1241,7 @@ proxies:
 $( [[ "$insec_field" == "true" && -n "$pinhex" ]] && echo "    fingerprint: ${pinhex}" )
 $( $is_range && echo "    ports: ${rest}" && echo "    hop-interval: 10" || echo "" )
 $( [[ -n "$obfs_pw" ]] && echo "    obfs: salamander" && echo "    obfs-password: ${obfs_pw}" || echo "" )
+${bw_lines_mihomo}
     alpn:
       - h3
 
@@ -938,7 +1277,14 @@ EOF
     else
         link="${link}&obfs=none"
     fi
-    link="${link}&upmbps=45&downmbps=150"
+    # 带宽: bw_up_cl/bw_dn_cl 已在上方解析 (server bw 存在→方向对偶; 否则取面板默认 CLIENT_BW_UP/DOWN)
+    if [[ "$(node_get "$sf" bw_ign 2>/dev/null)" == "true" ]]; then
+        print_info "该节点 ignoreClientBandwidth=true: 服务端忽略客户端带宽提示, 分享链接里 upmbps/downmbps 只是参考值"
+    fi
+    [[ -n "$bw_up_note" ]] && print_info "$bw_up_note"
+    local link_bw=""
+    [[ -n "$bw_up_cl" && -n "$bw_dn_cl" ]] && link_bw="&upmbps=$bw_up_cl&downmbps=$bw_dn_cl"
+    link="${link}${link_bw}"
     [[ -n "$mport_param" ]] && link="${link}${mport_param}"
     [[ -n "$ech_param" ]] && link="${link}&${ech_param}"
     link="${link}#${name}"
@@ -984,6 +1330,9 @@ node_add() {
     fi
 
     local nauth nport
+    # Chrome Parrot 兼容性: 证书密钥类型检查 (仅警告, 不自动改证书)
+    local ktype; ktype=$(cert_key_type "$ncert")
+    [[ "$ktype" == "ed25519" ]] && print_warning "证书为 Ed25519: 实测 v2.12.3 时开启 Chrome Parrot 会握手失败 (CRYPTO_ERROR 0x128); 关闭 Chrome Parrot 后可正常连接 — 请在客户端同步关闭 Chrome Parrot"
     nauth=$(openssl rand -base64 16)
     nport=$(generate_port "Hysteria")
 
@@ -994,6 +1343,14 @@ node_add() {
     ask_obfs
     ECH_ENABLED=false; ECH_PUBLIC_NAME="$MASQ_DOMAIN"
     ask_ech
+
+    # —— 拥塞控制 / bandwidth / chrome parrot (v2.8.0+ 语义, 内核实测 v2.12.3) ——
+    echo ""
+    ask_srv_congestion
+    if [[ "$ECH_ENABLED" == "true" || "$SRV_CONGESTION" != "default" || -n "$SRV_BW_UP" ]]; then :; fi
+    if [[ -n "$SRV_BW_UP" && "$SRV_CONGESTION" == "bbr" ]]; then
+        print_info "注意: 服务端同时设置 bandwidth 与 congestion: BBR (bandwidth 将仅作为客户端提示对端协商参照, 服务端发送被 congestion 接管)"
+    fi
 
     local nech_pem=""
     if [[ "$ECH_ENABLED" == "true" ]]; then
@@ -1028,6 +1385,8 @@ masquerade:
     rewriteHost: true
 $( [[ -n "$OBFS_PASSWORD" ]] && printf '\nobfs:\n  type: salamander\n  salamander:\n    password: %s\n' "$OBFS_PASSWORD" )
 $( [[ -n "$nech_pem" ]] && printf '\nech:\n  keyPath: %s\n' "$nech_pem" )
+$(printf "\n%s\n" "$(srv_cc_block
+)")
 quic:
   initStreamReceiveWindow: 8388608
   maxStreamReceiveWindow: 8388608
@@ -1041,20 +1400,31 @@ EOF
     node_export_client "$name" >/dev/null
 
     printf "立即启动此节点? (y/N): "
-    read -r runyn
-    if [[ "$(clean_input2 "${runyn:-n}")" =~ ^[Yy] ]]; then
+    read -r runyn || runyn="n"
+    local PRECHECK_FAILED=false
+    if ! validate_node_cfg "$(node_file "$name")"; then
+        PRECHECK_FAILED=true
+        print_error "✗ 配置未通过预检, 已阻止启动 (上面列出的原因); 文件仍保留在 ${NODES_OUT_DIR}/"
+    elif [[ "$(clean_input2 "${runyn:-n}")" =~ ^[Yy] ]]; then
         systemctl enable --now "hysteria-server@${name}.service" >/dev/null 2>&1
         sleep 2
         if systemctl is-active --quiet "hysteria-server@${name}.service"; then
-            print_ok "节点 $name 已启动 -> $(node_get "$(node_file "$name")" listen)"
+            print_ok "节点 $name 已启动, 服务端口: $(node_get "$(node_file "$name")" listen)"
         else
-            print_error "启动失败: journalctl -u hysteria-server@${name}.service -n 20"
+            print_error "启动失败 —— 常见原因: 端口被占用 / 证书文件没权限。用『菜单9 服务端日志』看最后一行: journalctl -u hysteria-server@${name}.service -n 20"
         fi
+    else
+        print_info "暂不启动 (之后可在 多节点管理 3 里启动)"
     fi
     echo
-    echo "  客户端配置: ${NODES_OUT_DIR}/${name}/client.yaml"
-    echo "  分享链接  : ${NODES_OUT_DIR}/${name}/share.txt"
+    if [[ "${PRECHECK_FAILED:-false}" == "true" ]]; then
+        print_info "修正问题后可在『多节点管理 3.节点 启停』里再次启动"
+    else
+        echo "  客户端配置: ${NODES_OUT_DIR}/${name}/client.yaml"
+        echo "  分享链接  : ${NODES_OUT_DIR}/${name}/share.txt"
+    fi
 }
+# (配置/链接路径在 validate 失败时已单独提示错误; 不静默覆盖)
 
 node_list() {
     scan_nodes
@@ -1081,7 +1451,7 @@ node_pick() {
     local i=1
     for n in "${NODE_NAMES[@]}"; do echo "  $i) $n" >&2; ((i++)); done
     printf "选择节点编号 (1-${#NODE_NAMES[@]}): " >&2
-    read -r c < /dev/tty
+    read -r c 2>/dev/null </dev/tty || { read -r c <&0 || c=""; }
     if [[ "$c" =~ ^[0-9]+$ ]] && (( c >= 1 && c <= ${#NODE_NAMES[@]} )); then
         echo "${NODE_NAMES[$((c-1))]}"
         return 0
@@ -1118,14 +1488,14 @@ node_menu() {
                         if validate_node_cfg "$uf"; then
                             systemctl start "${un}" && print_ok "已启动"
                         else
-                            print_error "配置验证未通过, 已阻止启动"
+                            print_error "✗ 启动被拦截, 原因见上方红字; 修好后重试"
                         fi;;
                     2) systemctl stop "${un}" && print_ok "已停止";;
                     3)
                         if validate_node_cfg "$uf"; then
                             systemctl restart "${un}" && print_ok "已重启"
                         else
-                            print_error "配置验证未通过, 已阻止重启"
+                            print_error "✗ 重启被拦截, 原因见上方红字; 修好后重试"
                         fi;;
                     4) systemctl status "${un}" --no-pager | head -12 ;;
                     5) validate_node_cfg "$uf" && print_ok "配置验证通过" ;;
@@ -1134,13 +1504,16 @@ node_menu() {
                 local n=$(node_pick) || continue
                 [[ "$n" == "default" ]] && { print_error "默认节点请用主菜单 2 (卸载)"; continue; }
                 printf "确认删除节点 %s? 输入大写 DEL 确认: " "$n"
-                read -r dc
+                read -r dc || dc=""
                 if [[ "$dc" == "DEL" ]]; then
+                    mkdir -p /tmp/hy2-node-del-bak
+                    tar -czf "/tmp/hy2-node-del-bak/node-${n}-$(date +%m%d%H%M).tar.gz" -C /etc/hysteria "${n}.yaml" 2>/dev/null && print_info "已把该节点配置备份到 /tmp/hy2-node-del-bak/ (防止误删后找不回)"
                     systemctl stop "hysteria-server@${n}.service" 2>/dev/null
                     systemctl disable "hysteria-server@${n}.service" 2>/dev/null
                     rm -f /etc/hysteria/${n}.yaml /etc/hysteria/hy2-${n}.yaml /etc/hysteria/server-${n}.crt /etc/hysteria/server-${n}.key /etc/hysteria/ech-${n}.pem
                     rm -rf "${NODES_OUT_DIR:?}/${n}"
-                    print_ok "节点 $n 已删除"
+                    systemctl daemon-reload 2>/dev/null
+                    print_ok "节点 $n 已删除 (配置已备份到 /tmp/hy2-node-del-bak/)"
                 fi ;;
             5)
                 ensure_node_dirs
@@ -1174,7 +1547,10 @@ validate_node_cfg() {
     local clean=$(echo "$listen" | sed 's/[" ]//g; s/^[^0-9]*//')
     [[ -n "$clean" && "$clean" =~ ^[0-9]+(-[0-9]+$)?$ ]] || { echo "listen 格式非法: $listen"; errs=$((errs+1)); }
     { local sp_v ep_v; sp="${clean%%-*}"; [[ "$clean" =~ - ]] && ep="${clean##*-}" || ep="$sp" ; } 2>/dev/null
-    (( sp >= 1 && sp <= 65535 && ep >= 1 && ep <= 65535 && sp <= ep )) || { echo "listen 端口越界(1-65535 或区间 reversed): $listen"; errs=$((errs+1)); }
+    sp="${sp:-0}"; ep="${ep:-0}"
+    if [[ -n "$clean" ]]; then
+        (( sp >= 1 && sp <= 65535 && ep >= 1 && ep <= 65535 && sp <= ep )) || { echo "listen 端口越界 (应为 1-65535 或 起点-终点): ${listen:0:60}"; errs=$((errs+1)); }
+    fi
 
     # cert/key 可读且被 hysteria 用户可读
     local cert key
@@ -1377,11 +1753,16 @@ if obfs != "none" and obfspw:
 if get("mport"):
     lines.append("")
     lines.append("transport:\n  udp:\n    hopInterval: 30s")
-# 带宽 (服务端分享链接有值可直接用)
+# 带宽 (服务端分享链接有值可直接用; 支持单方向 Brutal)
 up = get("upmbps"); down = get("downmbps")
-if up and down:
+bw_lines = []
+if up:
+    bw_lines.append(f"  up: {up} mbps")
+if down:
+    bw_lines.append(f"  down: {down} mbps")
+if bw_lines:
     lines.append("")
-    lines.append(f"bandwidth:\n  up: {up} mbps\n  down: {down} mbps")
+    lines.append("bandwidth:\n" + "\n".join(bw_lines))
 print("\n".join(lines), file=os.sys.stdout)
 PYEOF
 }
@@ -1397,13 +1778,17 @@ client_node_import_menu() {
     printf "节点名称 (标识用): "
     read -r name
     name=$(sanitize_node_name "${name:-n$(date +%H%M%S)}")
+    if [[ "$name" == "__illegal__" || -z "$name" ]]; then
+        print_error "✗ 节点名称无效: 不能是 config / default / hysteria / server, 也不能为空"
+        return 1
+    fi
     local fp="${CLIENT_NODE_DIR}/${name}.yaml"
     if [[ ! -d "$fp" ]]; then :; fi
     case "${im:-1}" in
         1)
             printf "粘贴链接: "
             read -r uri
-            [[ "$uri" == hysteria2://* || "$uri" == *hysteria2://* ]] || { print_error "不是 hysteria2 链接"; return 1; }
+            [[ "$uri" == hysteria2://* || "$uri" == *hysteria2://* ]] || { print_error "✗ 不是 hysteria2 链接 —— 复制时可能丢了开头, 正确样例: hysteria2://密码@1.2.3.4:36712?insecure=1&sni=..."; return 1; }
             uri=$(echo "$uri" | grep -oE "hysteria2://[^#]+" | head -1)
             local gen
             gen=$(client_parse_uri "$uri") || return 1
@@ -1416,14 +1801,48 @@ client_node_import_menu() {
             s5="${s5:-${d_s5}}"; hp="${hp:-${d_hp}}"
             [[ "${s5:-127.0.0.1:10808}" == 0.0.0.0:* || "${hp:-127.0.0.1:8080}" == 0.0.0.0:8080 ]] && \
                 print_warning "监听 0.0.0.0 = 本机全接口暴露, 请自行确认!"
+            # —— 高级客户端流量设置 (bandwidth/congestion/Chrome Parrot), 空回车=保持链接默认 (parrot on) ——
+            local atvb=""
+            printf "进阶: 拥塞/带宽/ChromeParrot? (默认: 否, y/N): " >&2
+            if ! read -r adv || [[ "$adv" == "" ]]; then adv=""; fi
+            adv=$(clean_input2 "$adv")
+            case "$adv" in y|Y)
+                ask_cli_traffic || return 1
+                echo "" >&2
+                echo "  Chrome QUIC Fingerprint Parroting (v2.11.0+ 默认启用, 客户端 QUIC 握手伪装为 Chrome):" >&2
+                echo "  1) Enabled (默认)  2) Disabled" >&2
+                printf "  选择 (默认1): " >&2
+                read -r adv || adv=""
+                case "$(clean_input2 "$adv")" in 2) CHROME_PARROT_ON=false;; *) CHROME_PARROT_ON=true;; esac
+                atvb=$'\n'"$(cli_traffic_block)"
+                ;;
+            esac
             cat > "${CLIENT_NODE_DIR}/${name}.yaml" <<EOF
 # [${name}] (来自 hysteria2 链接导入, "$(date +"%F %T")")
-${gen}
+${gen}${atvb}
 socks5:
   listen: ${s5:-127.0.0.1:10808}
 http:
   listen: ${hp:-127.0.0.1:8080}
 EOF
+            if [[ -n "$atvb" ]]; then
+                python3 - "${CLIENT_NODE_DIR}/${name}.yaml" <<'PYEOF'
+import re,sys
+path=sys.argv[1]
+t=open(path).read()
+import re
+t=re.sub(r"\nbandwidth:\n(?:[ \t].*\n)+","",t,count=1) if t.count("bandwidth:")>1 else t
+open(path,"w").write(t)
+PYEOF
+                sed -i "/^bandwidth:/{x;/./d;}" /dev/null 2>/dev/null
+                python3 - "${CLIENT_NODE_DIR}/${name}.yaml" <<'PYEOF'
+import re,sys
+path=sys.argv[1]
+t=open(path).read()
+t=t.replace("\n\n\n","\n\n")
+open(path,"w").write(t)
+PYEOF
+            fi
             print_ok "节点 $name 已导入 -> ${CLIENT_NODE_DIR}/${name}.yaml"
             ;;
         2)
@@ -1432,6 +1851,55 @@ EOF
             cp "$yp" "${CLIENT_NODE_DIR}/${name}.yaml"
             print_ok "节点 $name 已从文件导入";;
     esac
+}
+
+# ---- 当前节点 拥塞/带宽/Chrome Parrot 调整 (就地编辑 current.yaml 与对应 nodes/<名>.yaml) ----
+cc_traffic_tune() {
+    [[ -f "${CLIENT_DIR}/current.yaml" ]] || { print_error "尚未设置当前节点 (菜单 4)"; return 1; }
+    echo "当前节点流量设置摘要:"
+    grep -E "^\s*(bandwidth|  up:|  down:|congestion|  type:|  profile:|disableChromeParrot|quic:)" "${CLIENT_DIR}/current.yaml" 2>/dev/null | head -10
+    local cur="${CLIENT_DIR}/current.yaml"
+    local matched=""
+    if [[ -f "$cur" ]]; then
+        local ch y cf
+        ch=$(md5sum "$cur" 2>/dev/null | awk '{print $1}')
+        for cf in "${CLIENT_DIR}"/nodes/*.yaml; do
+            [[ -f "$cf" ]] || break
+            y=$(md5sum "$cf" 2>/dev/null | awk '{print $1}')
+            [[ "$y" == "$ch" ]] && { NODE_MATCH="$cf"; break; }
+            NODE_MATCH=""
+        done
+    fi
+    ask_cli_traffic || return 1
+    echo "" >&2
+    echo "  Chrome QUIC Fingerprint Parroting (v2.11.0+ 默认启用):" >&2
+    echo "  1) Enabled (默认)  2) Disabled" >&2
+    printf "  选择 (默认1): " >&2
+    read -r adj || adj=""
+    case "$(clean_input2 "$adj")" in 2) CHROME_PARROT_ON=false;; *) CHROME_PARROT_ON=true;; esac
+    # python 就地替换: 删除旧 bandwidth/congestion/quic 顶层块, 追加新块
+    python3 - "${cur}" "$(cli_traffic_block)" <<'PYEOF'
+import re,sys
+path=sys.argv[1]; add=sys.argv[2] if len(sys.argv)>2 else ""
+t=open(path).read()
+# remove old top-level blocks
+t=re.sub(r"\nbandwidth:\n(?:[ \t].*\n)+","",t)
+t=re.sub(r"\ncongestion:\n(?:[ \t].*\n)+","",t)
+t=re.sub(r"\nquic:\n(?:[ \t].*\n)+","",t)
+t=t.rstrip("\n")
+if add:
+    if add.startswith("\n"): pass
+    else: add="\n"+add
+    t=t+add.replace("\n\n","\n",1)+"\n"
+t=re.sub(r"\n{3,}","\n\n",t)
+open(path,"w").write(t)
+PYEOF
+    # 同步 nodes/<名>.yaml (若 current 与某节点文件一致)
+    if [[ -n "${NODE_MATCH:-}" ]]; then
+        cp "$cur" "$NODE_MATCH"
+        print_info "已同步到节点文件: $NODE_MATCH"
+    fi
+    print_ok "流量设置已写入 current.yaml (重启客户端后生效)"
 }
 
 client_node_pick() {
@@ -1490,6 +1958,22 @@ client_start() {
 client_stop()     { systemctl stop hysteria-client.service; }
 client_restart()  { systemctl restart hysteria-client.service; }
 client_status()   { systemctl status hysteria-client.service --no-pager | head -12; }
+
+# 客户端节点列表 (nodes/*.yaml)
+client_node_list() {
+    ensure_client_dirs
+    local i=1 f
+    echo "节点列表 (sources in ${CLIENT_NODE_DIR}):"
+    local has=0
+    for f in "${CLIENT_NODE_DIR}"/*.yaml; do
+        [[ -f "$f" ]] || { echo "  (空 — 还没有任何节点)"; return; }
+        local srv=$(awk '/^server:/{print $2; exit}' "$f")
+        local bwup bwdn
+        bwup=$(awk '/^bandwidth:/{f=1;next} f&&/^  up:/{ if ($3=="") print $2; else print $2" "$3; exit }' "$f")
+        printf "  %d) %-20s 出口=%-24s 上行=%-12s\n" "$i" "${f%.yaml}" "${srv:-?}" "${bwup:-未设置}"
+        ((i++))
+    done
+}
 client_logs()     { journalctl -u hysteria-client.service -n 40 --no-pager ${1:+-f} ; }
 
 # 健康检查 (进程/监听/真实出站: HTTP/HTTPS/UDP/IPv4/IPv6, 出口 IP 一致性验证)
@@ -1666,8 +2150,7 @@ cc_find_free() {
 
 cc_client_module() {
     ensure_client_dirs
-    while true; do
-        # 当前节点名称: 与 nodes/*.yaml 内容比对得出 (basename current.yaml 恒为字面量, 无信息量)
+    while true; do        # 当前节点名称: 与 nodes/*.yaml 内容比对得出 (basename current.yaml 恒为字面量, 无信息量)
         local cn="未设置"
         if [[ -f "$CLIENT_DIR/current.yaml" ]]; then
             local ch yl; ch=$(md5sum "$CLIENT_DIR/current.yaml" &>/dev/null; true)
@@ -1695,6 +2178,7 @@ cc_client_module() {
   7. 查看日志
   8. 修改本地代理监听 (端口/LAN IP)
   9. 健康检查 (进程/监听/代理 HTTP/HTTPS/UDP/IPv4/IPv6)
+  t. 当前节点 拥塞/带宽/Chrome Parrot 调整 (v2.12.3)
   0. 返回
   ----------------------"
         read -p "请输入选项 [0-9]: " ci || { echo "输入流已结束(EOF), 退出"; exit 130; }
@@ -1709,6 +2193,7 @@ cc_client_module() {
             7) client_do_logs ;;
             8) client_ports_edit ;;
             9) client_health ;;
+            t|T) cc_traffic_tune ;;
             *) print_error "无效的选项" ;;
         esac
         echo && read -p "按回车键继续..." && echo
@@ -1782,9 +2267,8 @@ client_do_proxy_probe() {
 # 卸载 Hysteria 2
 uninstall_hysteria() {
     echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${PLAIN}"
-    echo -e "${RED}!!  危险: 即将彻底卸载 Hysteria 2 并删除  ${PLAIN}"
-    echo -e "${RED}!!  /etc/hysteria 与 $INSTALL_DIR 全部数据  ${PLAIN}"
-    echo -e "${RED}!!  (含后再也买不到的所有节点配置/证书!)  ${PLAIN}"
+    echo -e "${RED}!!  危险: 即将彻底卸载 Hysteria 2 并删除
+!!  所有节点配置和证书 (删掉就找不回!))  ${PLAIN}"
     echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${PLAIN}"
     printf "确认要继续? 输入大写 U N I N S T A L L 逐字确认: "
     local confirm
@@ -1794,11 +2278,22 @@ uninstall_hysteria() {
     tar -czf /tmp/hysteria-uninstall-bak/hysteria-$(date +%m%d%H%M).tar.gz /etc/hysteria "$INSTALL_DIR" 2>/dev/null
     print_info "卸载前已自动备份到 /tmp/hysteria-uninstall-bak/"
     print_info "开始卸载 Hysteria 2..."
-    systemctl stop hysteria-server.service
-    systemctl disable hysteria-server.service
+    print_info "正在停止所有 hysteria-server@* 节点实例..."
+    local un
+    while IFS= read -r un; do
+        [[ -n "$un" ]] || continue
+        systemctl stop "$un" 2>/dev/null
+        systemctl disable "$un" 2>/dev/null
+        print_info "  已停止并禁用: $un"
+    done < <(systemctl list-units "hysteria-server@*" --type=service --all --no-legend 2>/dev/null | awk '{print $1}')
+    systemctl stop hysteria-server.service 2>/dev/null
+    systemctl disable hysteria-server.service 2>/dev/null
+    systemctl stop hysteria-client.service 2>/dev/null
+    systemctl disable hysteria-client.service 2>/dev/null
     systemctl stop $RELAY_SERVICE 2>/dev/null
     systemctl disable $RELAY_SERVICE 2>/dev/null
     rm -f /etc/systemd/system/$RELAY_SERVICE
+    systemctl daemon-reload
     rm -rf /etc/hysteria
     rm -rf "$INSTALL_DIR"
     rm -f /usr/local/bin/catmihy2
@@ -1808,12 +2303,19 @@ uninstall_hysteria() {
 
 # 更新 Hysteria 2
 update_hysteria() {
-    print_info "开始更新 Hysteria 2..."
-    if ! bash <(curl -fsSL https://get.hy2.sh/); then
-        print_error "更新失败"
+    print_info "开始更新 Hysteria 2 内核..."
+    if ! bash <(curl -fsSL --max-time 120 https://get.hy2.sh/); then
+        print_error "内核下载/安装失败 (网络问题?) —— 现有服务未动, 稍后再试"
         return 1
     fi
-    print_info "更新成功"
+    print_info "内核已更新, 正在重启所有节点实例..."
+    local un
+    while IFS= read -r un; do
+        [[ -n "$un" ]] || continue
+        systemctl restart "$un" 2>/dev/null
+        print_info "  已重启: $un"
+    done < <(systemctl list-units "hysteria-server@*" --type=service --no-legend 2>/dev/null | awk '{print $1}')
+    systemctl restart hysteria-client.service 2>/dev/null
     systemctl restart hysteria-server.service
 }
 
@@ -2072,6 +2574,320 @@ relay_menu() {
     done
 }
 
+
+# =========================================================
+# v2.3 信息架构重构: 一级菜单 = 服务端 / 客户端 / 状态与诊断 / 系统与内核
+# =========================================================
+# 服务端
+server_menu() {
+    while true; do
+        echo -e "
+  ${GREEN}服务端${PLAIN} (这台机器开放的 HY2 入口)
+  ----------------------
+  ${GREEN}1.${PLAIN} 安装 / 重建默认节点
+  ${GREEN}2.${PLAIN} 多节点管理
+  ${GREEN}3.${PLAIN} 修改节点配置
+  ${GREEN}4.${PLAIN} 服务端日志
+  ${GREEN}5.${PLAIN} 服务管理
+  ${GREEN}6.${PLAIN} 查看客户端配置 (Clash / 分享链接)
+  ${GREEN}0.${PLAIN} 返回
+  ----------------------"
+        read -p "请输入选项 [0-6]: " sm || { echo "输入被中断, 安全退出"; exit 130; }
+        case "$sm" in
+            0) return ;;
+            1) install_hysteria ;;
+            2) node_menu ;;
+            3) server_edit_config ;;
+            4) server_logs ;;
+            5) server_ctl_menu ;;
+            6) client_menu ;;
+            *) print_error "无效的选项" ;;
+        esac
+        echo && read -p "按回车键继续..." && echo
+    done
+}
+
+# 服务管理 (范围明示)
+server_ctl_menu() {
+    echo -e "
+  ${GREEN}服务管理${PLAIN}
+  ----------------------
+  ${GREEN}1.${PLAIN} 默认节点 启动 / 停止 / 重启
+  ${GREEN}2.${PLAIN} 指定节点 启动 / 停止 / 重启
+  ${GREEN}3.${PLAIN} 重启全部节点
+  ${GREEN}0.${PLAIN} 返回"
+    read -p "请输入选项 [0-3]: " sm2 || { echo "输入被中断, 安全退出"; exit 130; }
+    case "$sm2" in
+        1)
+            echo "  1) 启动  2) 停止  3) 重启"
+            read -p "选择: " op2 || op2=""
+            case "$op2" in
+                1) systemctl start hysteria-server.service && print_ok "✓ 默认节点已启动" ;;
+                2) systemctl stop hysteria-server.service && print_ok "✓ 默认节点已停止" ;;
+                3) systemctl restart hysteria-server.service && print_ok "✓ 默认节点已重启" ;;
+            esac ;;
+        2)
+            local sn; sn=$(node_pick) || { print_warning "无节点"; return; }
+            local un="hysteria-server@${sn}.service"
+            [[ "$sn" == "default" ]] && un="hysteria-server.service"
+            echo "  1) 启动  2) 停止  3) 重启"
+            read -p "选择: " op3 || op3=""
+            case "$op3" in
+                1) systemctl start "${un}" && print_ok "✓ ${sn} 已启动" ;;
+                2) systemctl stop "${un}" && print_ok "✓ ${sn} 已停止" ;;
+                3) systemctl restart "${un}" && print_ok "✓ ${sn} 已重启" ;;
+            esac ;;
+        3)
+            local un
+            while IFS= read -r un; do
+                [[ -n "$un" ]] || continue
+                systemctl restart "$un" 2>/dev/null && print_info "  已重启: $un"
+            done < <(systemctl list-units "hysteria-server*" --type=service --no-legend 2>/dev/null | awk '{print $1}')
+            print_ok "✓ 全部节点已重启" ;;
+    esac
+}
+
+# 修改节点配置 → default 走 modify_config; 其它节点如实说明
+server_edit_config() {
+    local sn; sn=$(node_pick) || { print_warning "无节点"; return; }
+    if [[ "$sn" == "default" ]]; then
+        modify_config
+    else
+        print_warning "『修改配置』目前只支持默认节点 (default)。"
+        print_info "节点 ${sn}: 可手工编辑 /etc/hysteria/${sn}.yaml, 然后在 1.服务端→2.多节点管理→3.节点→5 配置验证; 分享链接用 2→5 重新导出。"
+    fi
+}
+
+# 状态与诊断
+diag_menu() {
+    while true; do
+        echo -e "
+  ${GREEN}状态与诊断${PLAIN}
+  ----------------------
+  ${GREEN}1.${PLAIN} 总状态
+  ${GREEN}2.${PLAIN} 服务端状态 (节点列表)
+  ${GREEN}3.${PLAIN} 客户端状态
+  ${GREEN}4.${PLAIN} 网络健康检查
+  ${GREEN}5.${PLAIN} 系统服务检查
+  ${GREEN}0.${PLAIN} 返回
+  ----------------------"
+        read -p "请输入选项 [0-5]: " dm || { echo "输入被中断, 安全退出"; exit 130; }
+        case "$dm" in
+            0) return ;;
+            1) show_status_overview ;;
+            2) node_list ;;
+            3) client_status ;;
+            4)
+                if command -v hysteria >/dev/null 2>&1; then client_health; else print_warning "本机未安装客户端内核, 无法做隧道健康检查"; fi ;;
+            5)
+                systemctl --failed --no-legend 2>/dev/null | head -10
+                systemctl --failed --no-legend 2>/dev/null | wc -l | xargs -I{} echo "  失败的 systemd 服务数: {}" ;;
+            *) print_error "无效的选项" ;;
+        esac
+        echo && read -p "按回车键继续..." && echo
+    done
+}
+
+# 系统与内核
+sys_kernel_menu() {
+    echo -e "
+  ${GREEN}系统与内核${PLAIN}
+  ----------------------
+  ${GREEN}1.${PLAIN} 更新服务端内核 (所有节点会一并重启)
+  ${GREEN}2.${PLAIN} 卸载全部 (危险)
+  ${GREEN}3.${PLAIN} 客户端内核安装 / 更新
+  ${GREEN}0.${PLAIN} 返回"
+    read -p "请输入选项 [0-3]: " km || { echo "输入被中断, 安全退出"; exit 130; }
+    case "$km" in
+        1) update_hysteria ;;
+        2) uninstall_hysteria ;;
+        3) client_kernel_install ;;
+    esac
+}
+
+# 客户端 (统一功能中心)
+client_dashboard() {
+    while true; do
+        load_bw_env
+        local cct="● 未运行"
+        systemctl is-active --quiet hysteria-client.service 2>/dev/null && cct="${GREEN}● 运行中${PLAIN}"
+        echo -e "
+  ${GREEN}客户端${PLAIN} (本机作为 HY2 客户端)
+  ----------------------
+  状态: ${cct}
+  ----------------------
+  ${GREEN}1.${PLAIN} 节点管理
+  ${GREEN}2.${PLAIN} 当前节点设置
+  ${GREEN}3.${PLAIN} 代理设置
+  ${GREEN}4.${PLAIN} 客户端服务
+  ${GREEN}5.${PLAIN} 诊断
+  ${GREEN}6.${PLAIN} 日志
+  ${GREEN}7.${PLAIN} 内核管理
+  ${GREEN}8.${PLAIN} 带宽默认值
+  ${GREEN}9.${PLAIN} 中继管理
+  ${GREEN}0.${PLAIN} 返回
+  ----------------------"
+        read -p "请输入选项 [0-9]: " cd || { echo "输入被中断, 安全退出"; exit 130; }
+        case "$cd" in
+            0) return ;;
+            1) cli_node_menu ;;
+            2) cli_node_settings ;;
+            3) client_ports_edit ;;
+            4) client_ctl_menu ;;
+            5) cli_diag_menu ;;
+            6) client_do_logs ;;
+            7) cli_kernel_menu ;;
+            8) bw_menu ;;
+            9) relay_menu ;;
+            *) print_error "无效的选项" ;;
+        esac
+        echo && read -p "按回车键继续..." && echo
+    done
+}
+
+# 客户端 节点管理
+cli_node_menu() {
+    while true; do
+        echo -e "
+  ${GREEN}节点管理 (客户端)${PLAIN}
+  ----------------------
+  ${GREEN}1.${PLAIN} 添加 / 导入节点
+  ${GREEN}2.${PLAIN} 节点列表
+  ${GREEN}3.${PLAIN} 切换当前节点
+  ${GREEN}4.${PLAIN} 当前节点信息
+  ${GREEN}5.${PLAIN} 删除节点
+  ${GREEN}0.${PLAIN} 返回
+  ----------------------"
+        read -p "请输入选项 [0-5]: " cn1 || { echo "输入被中断, 安全退出"; exit 130; }
+        case "$cn1" in
+            0) return ;;
+            1) client_node_import_menu ;;
+            2) client_node_list ;;
+            3) client_node_switch ;;
+            4) client_show_current ;;
+            5) client_node_delete ;;
+            *) print_error "无效的选项" ;;
+        esac
+        echo && read -p "按回车键继续..." && echo
+    done
+}
+
+# 客户端 当前节点设置 (正式入口, 替代隐藏的 t)
+cli_node_settings() {
+    while true; do
+        load_bw_env
+        local cur="${CLIENT_DIR}/current.yaml"
+        if [[ ! -f "$cur" ]]; then
+            print_warning "还没有导入任何节点。请先在『1. 节点管理』里添加节点。"
+            return
+        fi
+        local b d cg parrot
+        bwval() { awk -v k="$2" '/^bandwidth:/{f=1} f&&/^  '"$2"':/{ if ($3=="") print $2; else print $2" "$3; exit }' "$1" 2>/dev/null; }
+        b=$(bwval "$cur" up)
+        d=$(bwval "$cur" down)
+        cg=$(awk '/^congestion:/{f=1;next} f&&/^  type:/{print $2; exit}' "$cur" 2>/dev/null)
+        [[ -z "$cg" ]] && cg="未设置 (自动)"
+        if grep -q "disableChromeParrot: true" "$cur" 2>/dev/null; then
+            parrot="已停用"
+        else
+            parrot="已启用 (默认)"
+        fi
+        echo -e "
+  ${GREEN}当前节点设置${PLAIN}
+  ----------------------
+  上传带宽: ${b:-未设置 (自动)}
+  下载带宽: ${d:-未设置 (自动)}
+  拥塞控制: ${cg}
+  Chrome Parrot 握手伪装: ${parrot}
+  ----------------------
+  ${GREEN}1.${PLAIN} 拥塞控制 / 带宽设置
+  ${GREEN}2.${PLAIN} Chrome Parrot
+  ${GREEN}0.${PLAIN} 返回
+  ----------------------
+  说明: 修改后需要重启客户端服务才能生效。"
+        read -p "请输入选项 [0-2]: " cv || { echo "输入被中断, 安全退出"; exit 130; }
+        case "$cv" in
+            0) return ;;
+            1) cc_traffic_tune ;;
+            2) cli_parrot_toggle ;;
+            *) print_error "无效的选项" ;;
+        esac
+        echo && read -p "按回车键继续..." && echo
+    done
+}
+
+# 客户端 诊断
+cli_diag_menu() {
+    echo -e "
+  ${GREEN}诊断${PLAIN}
+  ----------------------
+  ${GREEN}1.${PLAIN} 健康检查 (进程 / 监听 / HTTPS / UDP / IPv4 / IPv6)
+  ${GREEN}2.${PLAIN} 测试拨号
+  ${GREEN}3.${PLAIN} 总状态页
+  ${GREEN}0.${PLAIN} 返回"
+    read -p "请输入选项 [0-3]: " cdm || { echo "输入被中断, 安全退出"; exit 130; }
+    case "$cdm" in
+        1) client_health ;;
+        2) client_do_proxy_probe ;;
+        3) show_status_overview ;;
+    esac
+}
+
+# 客户端 内核管理
+cli_kernel_menu() {
+    echo -e "
+  ${GREEN}内核管理 (客户端)${PLAIN}
+  ----------------------
+  ${GREEN}1.${PLAIN} 安装 / 更新内核
+  ${GREEN}2.${PLAIN} 查看版本
+  ${GREEN}0.${PLAIN} 返回"
+    read -p "请输入选项 [0-2]: " ckm || { echo "输入被中断, 安全退出"; exit 130; }
+    case "$ckm" in
+        1) client_kernel_install ;;
+        2) client_kernel_version ;;
+    esac
+}
+
+# Chrome Parrot 单项开关 (当前节点)
+cli_parrot_toggle() {
+    local cur="${CLIENT_DIR}/current.yaml"
+    [[ -f "$cur" ]] || { print_warning "还没有任何节点"; return; }
+    echo "  1) 启用 (握手伪装成 Chrome, 默认)"
+    echo "  2) 停用 (QUIC 使用标准客户端指纹)"
+    printf "选择 (默认1): "
+    local sel; read -r sel || sel=""
+    sel=$(echo "${sel:-1}" | xargs)
+    python3 - "$cur" "$sel" <<'PYEOF'
+import re,sys
+p,sel=sys.argv[1],sys.argv[2]
+t=open(p).read()
+t=re.sub(r"^quic:\n(?:[ \t].*\n)+","",t,flags=re.M)
+t=re.sub(r"\n\n\n","\n\n",t)
+val = "false" if sel=="2" else "true"
+t=t.rstrip()+"\n\nquic:\n  disableChromeParrot: "+val+"\n"
+open(p,"w").write(t)
+PYEOF
+    if [[ "$sel" == "2" ]]; then
+        print_ok "✓ Chrome Parrot 已停用 (写入 current.yaml)"
+    else
+        print_ok "✓ Chrome Parrot 已恢复启用 (默认)"
+    fi
+    print_info "重启客户端 (客户端→4.客户端服务) 后生效"
+}
+
+# 客户端 节点删除
+client_node_delete() {
+    local n; n=$(client_node_pick) || { print_warning "没有可删除的节点"; return; }
+    printf "删除已导入的客户端节点 %s? 输入 DEL 确认: " "$n"
+    local dc; read -r dc || dc=""
+    if [[ "$dc" != "DEL" ]]; then print_info "已取消"; return; fi
+    rm -f "${CLIENT_NODE_DIR}/${n}.yaml"
+    print_ok "✓ 已删除 ${n}.yaml (如它正是当前使用的节点, 请重新导入或切换其它节点)"
+}
+
+# (旧 client_menu 保留: 服务端→6 复用)
+
+
 # 客户端管理子菜单
 client_menu() {
     while true; do
@@ -2203,43 +3019,63 @@ show_status_overview() {
     local hyv
     hyv=$(/usr/local/bin/hysteria version 2>/dev/null | grep -wm1 Version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     [[ -z "$hyv" ]] && hyv="未安装"
-    local sst="停止(/未装)" cct="停止(/未装)"
-    systemctl is-active --quiet hysteria-server.service 2>/dev/null && sst="${GREEN}RUNNING${PLAIN}"
-    systemctl is-active --quiet hysteria-client.service 2>/dev/null && cct="${GREEN}RUNNING${PLAIN}" || cct="${RED}未启动${PLAIN}"
-    systemctl is-active --quiet hysteria-server.service 2>/dev/null && sst="${GREEN}RUNNING${PLAIN}" || sst="${RED}停止${PLAIN}"
+    local sst="● 停止" cct="● 未启动"
+    systemctl is-active --quiet hysteria-server.service 2>/dev/null && sst="${GREEN}● 运行中${PLAIN}" || sst="${RED}● 停止${PLAIN}"
+    systemctl is-active --quiet hysteria-client.service 2>/dev/null && cct="${GREEN}● 运行中${PLAIN}" || cct="${RED}● 未启动${PLAIN}"
     # 服务端节点特性
     scan_nodes quiet 2>/dev/null
-    echo -e "${GREEN}══════════════ HY2 总状态 ══════════════${PLAIN}"
-    echo -e "  Server (default): $sst"
+    echo -e "${GREEN}══════════ HY2 总状态 ══════════${PLAIN}"
+    echo -e "  ${BLUE}[服务端]${PLAIN} (本机开放的入口) $sst"
     if (( ${#NODE_NAMES[@]} > 0 )); then
         for n in "${NODE_NAMES[@]}"; do
-            local st="停止(/未装)"
-            if [[ "$n" == "default" ]]; then st=$(systemctl is-active hysteria-server.service 2>/dev/null); else st=$(systemctl is-active "hysteria-server@$n.service" 2>/dev/null); fi
+            local st="● 停止"
+            if [[ "$n" == "default" ]]; then
+                systemctl is-active --quiet hysteria-server.service 2>/dev/null && st="${GREEN}● 运行中${PLAIN}"
+            else
+                systemctl is-active --quiet "hysteria-server@$n.service" 2>/dev/null && st="${GREEN}● 运行中${PLAIN}"
+            fi
             local uf; uf=$(node_file "$n")
             local lsn ob ex
             lsn=$(node_get "$uf" listen | tr -d '"')
             [[ -n "$(node_get "$uf" obfs_pw)" ]] && ob="Salamander" || ob="无"
-            grep -q '^ech:' "$uf" 2>/dev/null && ex="${GREEN}ON${PLAIN}" || ex="off"
-            echo -e "   - 节点 $n: ${st} listen=$lsn obfs=$ob ech=$ex"
+            grep -q '^ech:' "$uf" 2>/dev/null && ex="${GREEN}ECH开${PLAIN}" || ex="ECH关"
+            echo -e "   $st $(printf '%-12s' "$n") 端口 $(printf '%-12s' "$lsn") 伪装: $(printf '%-16s' "$(node_get "$uf" masq 2>/dev/null)") 混淆: $(printf '%-3s' "$ob") $ex"
         done
     fi
     echo
-    echo -e "  Client           : $cct"
-    local cn="(未导入)"; local y cf ch
+    echo -e "  ${BLUE}[客户端]${PLAIN} (本机出网隧道) $cct"
+    local cn="(未导入)" y cf ch found=""
     if [[ -f "$CLIENT_DIR/current.yaml" ]]; then
         ch=$(md5sum "$CLIENT_DIR/current.yaml" 2>/dev/null | awk '{print $1}')
+        cn="(手动编辑/未匹配)"
         for cf in "${CLIENT_DIR}"/nodes/*.yaml; do
             [[ -f "$cf" ]] || break
             y=$(md5sum "$cf" 2>/dev/null | awk '{print $1}')
-            [[ "$y" == "$ch" ]] && { cn="${cf##*/}"; cn="${cn%.yaml}"; break; }
-            cn="(已手动编辑)"
+            if [[ "$y" == "$ch" ]]; then cn="${cf##*/}"; cn="${cn%.yaml}"; found=1; break; fi
         done
     fi
+    # 客户端 → 服务端入口映射 (读 current.yaml 的 server)
+    local csr sym=""; csr=$(awk '/^server:/{print $2; exit}' "$CLIENT_DIR/current.yaml" 2>/dev/null)
     local sp hm
     sp=$(awk '/^socks5:/{f=1} f&&/^  listen:/{print $2; exit}' "$CLIENT_DIR/current.yaml" 2>/dev/null)
     hp=$(awk '/^http:/{f=1} f&&/^  listen:/{print $2; exit}' "$CLIENT_DIR/current.yaml" 2>/dev/null)
-    echo -e "  当前节点          : $cn"
-    echo -e "  HY2 Version      : ${hyv}"
+    echo -e "  当前节点 : $cn"
+    if [[ -n "$csr" ]]; then
+        sym=""
+        for n in "${NODE_NAMES[@]:-}"; do
+            [[ -z "$n" ]] && continue
+            local nls=$(node_get "$(node_file "$n")" listen 2>/dev/null | tr -d '"' | sed 's/^[^0-9]*//; s/-.*//')
+            [[ -n "$nls" && "$csr" == *":$nls" ]] && { sym="$n"; break; }
+        done
+        if [[ -n "$sym" ]]; then
+            echo -e "  ${GREEN}→ 出网入口 $csr = 本机服务端节点 '$sym'${PLAIN}"
+        elif ((${#NODE_NAMES[@]:-0} > 0)); then
+            echo -e "  ${GREEN}→ 出网入口 $csr (来自第三方服务器, 不在本机节点表里)${PLAIN}"
+        else
+            echo -e "  ${GREEN}→ 出网入口 $csr (这是一台纯客户端机器)${PLAIN}"
+        fi
+    fi
+    echo -e "  HY2 版本  : ${hyv}"
     [[ -n "$sp" ]] && echo -e "  SOCKS5           : $sp"
     [[ -n "$hp" ]] && echo -e "  HTTP Proxy       : $hp"
     echo
@@ -2248,10 +3084,10 @@ show_status_overview() {
         local s5="socks5h://${sp}" eip4 eip6
         printf "  IPv4 (隧道 v4)   : 检测中"
         eip4=$(curl -4 -sx "$s5" --max-time 10 https://api.ipify.org 2>/dev/null)
-        [[ -n "$eip4" ]] && printf "\r  IPv4 (隧道 v4)   : ${GREEN}PASS${PLAIN} (出口 $eip4)\n" || printf "\r  IPv4 (隧道 v4)   : ${RED}FAIL${PLAIN}\n"
+        [[ -n "$eip4" ]] && printf "\r  IPv4 隧道   : ${GREEN}✓ 通了${PLAIN} (出口 $eip4)\n" || printf "\r  IPv4 隧道   : ${RED}✗ 不通${PLAIN} (看看节点是否被墙/账号对不对)\n"
         printf "  IPv6 (隧道 v6)   : 检测中"
         eip6=$(curl -sx "$s5" --max-time 10 https://api6.ipify.org 2>/dev/null)
-        [[ -n "$eip6" && "$eip6" == *:* ]] && printf "\r  IPv6 (隧道 v6)   : ${GREEN}PASS${PLAIN} (出口 $eip6)\n" || printf "\r  IPv6 (隧道 v6)   : ${RED}FAIL${PLAIN}\n"
+        [[ -n "$eip6" && "$eip6" == *:* ]] && printf "\r  IPv6 隧道   : ${GREEN}✓ 通了${PLAIN} (出口 $eip6)\n" || printf "\r  IPv6 隧道   : ${RED}✗ 不通${PLAIN} (本机没有 IPv6 可忽略)\n"
         printf "  UDP (SOCKS5 UDP) : 检测中"
         local udpcs
         udpcs=$(python3 - "$sp" <<'PYEOF' 2>/dev/null
@@ -2273,7 +3109,7 @@ try:
 except Exception: pass
 PYEOF
 )
-        [[ "$udpcs" == "PASS" ]] && printf "\r  UDP (SOCKS5 UDP) : ${GREEN}PASS${PLAIN}\n" || printf "\r  UDP (SOCKS5 UDP) : ${RED}FAIL${PLAIN}\n"
+        [[ "$udpcs" == "PASS" ]] && printf "\r  UDP 通道    : ${GREEN}✓ 通了${PLAIN}\n" || printf "\r  UDP 通道    : ${RED}✗ 不通${PLAIN}\n"
         echo -e "  探测时间          : $(date +"%F %T")"
     fi
     echo -e "${GREEN}════════════════════════════════════════${PLAIN}"
@@ -2295,45 +3131,35 @@ server_logs() {
 # 主菜单
 show_menu() {
     # 获取服务状态
-    hysteria_server_status=$(systemctl is-active hysteria-server.service)
-    hysteria_server_status_text=$(if [[ "$hysteria_server_status" == "active" ]]; then echo -e "${GREEN}启动${PLAIN}"; else echo -e "${RED}未启动${PLAIN}"; fi)
-    
+    hysteria_server_status=$(systemctl is-active hysteria-server.service 2>/dev/null)
+    hysteria_server_status_text=$(if [[ "$hysteria_server_status" == "active" ]]; then echo -e "${GREEN}● 运行中${PLAIN}"; else echo -e "${RED}● 未运行${PLAIN}"; fi)
+    local cct="● 未运行"
+    systemctl is-active --quiet hysteria-client.service 2>/dev/null && cct="${GREEN}● 运行中${PLAIN}"
+
     # 显示菜单
     echo -e "
-  ${GREEN}Hysteria 2 管理脚本${PLAIN} (v2.1 服务端 + 客户端)
+  ${GREEN}Hysteria 2 管理面板${PLAIN}
   ============================
-  ${BLUE}[服务端]${PLAIN}
-  ${GREEN}1.${PLAIN} 安装/重建 默认节点
-  ${GREEN}2.${PLAIN} 多节点管理
-  ${GREEN}3.${PLAIN} 卸载全部 (Hysteria2 服务)
-  ${GREEN}4.${PLAIN} 更新内核
-  ${GREEN}5.${PLAIN} 重启服务 (默认节点)
-  ${GREEN}6.${PLAIN} 客户端查看 (服务端侧)
-  ${GREEN}7.${PLAIN} 修改配置 (默认节点)
-  ${GREEN}8.${PLAIN} 查询服务状态 (所有节点)
-  ${GREEN}9.${PLAIN} 服务端日志 (default / 节点名)
+  ${GREEN}1.${PLAIN} 服务端        (安装 / 多节点 / 日志)
+  ${GREEN}2.${PLAIN} 客户端        (节点 / 当前节点设置 / 诊断)
+  ${GREEN}3.${PLAIN} 状态与诊断
+  ${GREEN}4.${PLAIN} 系统与内核    (内核更新 / 卸载)
+  ${GREEN}0.${PLAIN} 退出
   ----------------------
-  ${BLUE}[总览 / 本机客户端]${PLAIN}
-  ${GREEN}s.${PLAIN} 总状态页 (Server/Client/特性/ECH/出站 PASS|FAIL)
-  ${GREEN}c.${PLAIN} 客户端面板 (内核/节点导入/启动/健康检查)
-  ${GREEN}0.${PLAIN} 退出脚本
+  服务端状态: ${hysteria_server_status_text}
+  本机客户端状态: ${cct}
   ----------------------
-  服务状态: ${hysteria_server_status_text}
-  ----------------------"
-    read -p "请输入选项 [1-9 / s / c / 0]: " choice || { clear;echo;echo "输入流已结束(EOF), 退出"; exit 130; }
+  (快捷兼容: s=总状态c=客户端面板 b=带宽默认值)"
+    read -p "请输入选项 [1-4 / 0]: " choice || { clear;echo;echo "输入流被中断, 已安全退出"; exit 130; }
     case "$choice" in
         0) clear;exit 0 ;;
-        1) install_hysteria ;;
-        2) node_menu ;;
-        3) uninstall_hysteria ;;
-        4) update_hysteria ;;
-        5) systemctl restart hysteria-server.service ;;
-        6) client_menu ;;
-        7) modify_config ;;
-        8) systemctl status hysteria-server.service --no-pager | head -15; node_list ;;
-        9) server_logs ;;
+        1) server_menu ;;
+        2) client_dashboard ;;
+        3) diag_menu ;;
+        4) sys_kernel_menu ;;
         s|S) show_status_overview ;;
-        c|C) cc_client_module ;;
+        c|C) client_dashboard ;;
+        b|B) bw_menu ;;
         *) echo -e "${RED}无效的选项 ${choice}${PLAIN}" ;;
     esac
 
@@ -2342,6 +3168,13 @@ show_menu() {
 
 # 主程序
 main() {
+    # 并发保护: 同一时刻只允许一个面板
+    local lockf="${HY2_PANEL_LOCK:-/tmp/hy2-panel.lock}"
+    exec 9>"$lockf"
+    if ! flock -n 9 2>/dev/null; then
+        echo "另一个 hy2 管理面板正在运行 ($lockf), 请先关闭它再操作。"; exit 1
+    fi
+    load_bw_env
     show_banner
     create_shortcut
     while true; do
