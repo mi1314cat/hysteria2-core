@@ -665,7 +665,7 @@ ask_srv_congestion() {
     case "$c" in
         2) SRV_CONGESTION="bbr"
            local pf
-           printf "  BBR profile: 1) standard 2) conservative 3) aggressive (默认1): " >&2
+           printf "  BBR 调优风格: 1) 标准 (默认)  2) 稳妥  3) 激进 (选号即可): " >&2
            read -r pf || pf=""
            case "$(clean_input2 "$pf")" in ""|1) SRV_BBR_PROFILE="standard";; 2) SRV_BBR_PROFILE="conservative";; 3) SRV_BBR_PROFILE="aggressive";; *) SRV_BBR_PROFILE="standard";; esac
            ;;
@@ -676,15 +676,15 @@ ask_srv_congestion() {
     printf "  设置服务端 bandwidth (up/down)? (默认: 否, y/N): " >&2
     read -r yn || return 0
     case "$(clean_input2 "$yn")" in y|Y)
-        SRV_BW_UP=$(bw_read_field "  Upload") || return 0
+        SRV_BW_UP=$(bw_read_field "  上传 (服务端 up, 即客户端的上传方向)") || return 0
         [[ -z "$SRV_BW_UP" ]] && { print_warning "bandwidth 需同时设置 up/down, 已跳过"; return 0; }
-        SRV_BW_DOWN=$(bw_read_field "Download (注意: 与客户端 up 相对)") || return 0
+        SRV_BW_DOWN=$(bw_read_field "下载 (服务端 down, 注意: 与客户端上传方向相对)") || return 0
         [[ -z "$SRV_BW_DOWN" ]] && { print_warning "bandwidth 需同时设置 up/down, 已跳过"; return 0; }
         printf "  ignoreClientBandwidth (忽略客户端带宽提示)? (y/N): " >&2
         read -r yn || return 0
         case "$(clean_input2 "$yn")" in y|Y) SRV_IGNORE_CBW=true; print_info "已设置: 客户端 bandwidth 提示将被忽略 (BTW: 官方语义 server_bw.down 决定客户端 down)";;
             *) SRV_IGNORE_CBW=false;; esac
-        printf "  Brutal Loss Compensation? 1) Enabled(默认) 2) Disabled: " >&2
+        printf "  Brutal 丢包补偿 (有丢包时略微提速硬凑设定值)? 1) 启用(默认)  2) 停用: " >&2
         read -r yn || return 0
         case "$(clean_input2 "$yn")" in 2) SRV_DISABLE_LOSSCOMP=true;; *) SRV_DISABLE_LOSSCOMP=false;; esac
         ;;
@@ -703,7 +703,7 @@ ask_cli_traffic() {
     read -r c || return 1
     case "$(clean_input2 "$c")" in
         2) CLI_CONGESTION="bbr"
-           printf "  BBR profile: 1) standard 2) conservative 3) aggressive (默认1): " >&2
+           printf "  BBR 调优风格: 1) 标准 (默认)  2) 稳妥  3) 激进 (选号即可): " >&2
            read -r c || return 1
            case "$(clean_input2 "$c")" in 2) CLI_BBR_PROFILE="conservative";; 3) CLI_BBR_PROFILE="aggressive";; *) CLI_BBR_PROFILE="standard";; esac ;;
         3) CLI_CONGESTION="reno" ;;
@@ -712,13 +712,13 @@ ask_cli_traffic() {
     printf "  设置客户端 bandwidth (up/down)? (默认: 不显式设置, 由服务端协商; y/N): " >&2
     read -r yn || return 0
     case "$(clean_input2 "$yn")" in y|Y)
-        printf "  Upload (客户端 up, 默认 %s Mbps, 回车保留): " "$CLIENT_BW_UP" >&2
-        CLI_BW_UP=$(bw_read_field "Upload" "") || CLI_BW_UP=$CLIENT_BW_UP
+        printf "  上传 (客户端 up, 默认 %s Mbps, 回车保留): " "$CLIENT_BW_UP" >&2
+        CLI_BW_UP=$(bw_read_field "上传" "") || CLI_BW_UP=$CLIENT_BW_UP
         [[ -z "$CLI_BW_UP" ]] && CLI_BW_UP=$CLIENT_BW_UP
-        printf "  Download (客户端 down, 默认 %s Mbps, 回车保留): " "$CLIENT_BW_DOWN" >&2
-        CLI_BW_DOWN=$(bw_read_field "Download" "") || CLI_BW_DOWN=$CLIENT_BW_DOWN
+        printf "  下载 (客户端 down, 默认 %s Mbps, 回车保留): " "$CLIENT_BW_DOWN" >&2
+        CLI_BW_DOWN=$(bw_read_field "下载" "") || CLI_BW_DOWN=$CLIENT_BW_DOWN
         [[ -z "$CLI_BW_DOWN" ]] && CLI_BW_DOWN=$CLIENT_BW_DOWN
-        printf "  Brutal Loss Compensation? 1) Enabled(默认) 2) Disabled: " >&2
+        printf "  Brutal 丢包补偿 (有丢包时略微提速硬凑设定值)? 1) 启用(默认)  2) 停用: " >&2
         read -r yn || return 0
         case "$(clean_input2 "$yn")" in 2) CLI_DISABLE_LOSSCOMP=true;; *) CLI_DISABLE_LOSSCOMP=false;; esac
         ;;
@@ -728,6 +728,9 @@ ask_cli_traffic() {
 cli_traffic_block() { # 生成 client yaml 增量块 (bandwidth/congestion/quic.disableChromeParrot)
     local up="$CLI_BW_UP" down="$CLI_BW_DOWN" lc="$CLI_DISABLE_LOSSCOMP"
     local out=""
+    # 自动补单位: 若用户只填了数字 (45) → 45 mbps (官方要求 "45 mbps")
+    [[ "$up" =~ ^[0-9.]+$ ]] && up="${up} mbps"
+    [[ "$down" =~ ^[0-9.]+$ ]] && down="${down} mbps"
     if [[ -n "$up" || -n "$down" ]]; then
         out+="bandwidth:"
         [[ -n "$up" ]] && out+=$'\n  up: '"$up"
@@ -1850,8 +1853,8 @@ client_node_import_menu() {
             case "$adv" in y|Y)
                 ask_cli_traffic || return 1
                 echo "" >&2
-                echo "  Chrome QUIC Fingerprint Parroting (v2.11.0+ 默认启用, 客户端 QUIC 握手伪装为 Chrome):" >&2
-                echo "  1) Enabled (默认)  2) Disabled" >&2
+                echo "  Chrome 握手伪装 (Chrome Parrot; 默认开, 让 QUIC 握手包看起来像 Google Chrome):" >&2
+                echo "  1) 启用 (默认)  2) 停用" >&2
                 printf "  选择 (默认1): " >&2
                 read -r adv || adv=""
                 case "$(clean_input2 "$adv")" in 2) CHROME_PARROT_ON=false;; *) CHROME_PARROT_ON=true;; esac
@@ -1885,6 +1888,23 @@ open(path,"w").write(t)
 PYEOF
             fi
             print_ok "节点 $name 已导入 -> ${CLIENT_NODE_DIR}/${name}.yaml"
+            # 若本机还没有"当前节点", 引导一步到位: 询问是否立刻切换到这个节点
+            if [[ ! -f "${CLIENT_DIR}/current.yaml" ]]; then
+                printf "本机还没有在用的节点, 是否把 %s 设为当前节点并重启客户端? (Y/n): " "$name"
+                read -r sc || sc=""
+                case "$(echo "${sc:-y}" | xargs | tr 'A-Z' 'a-z')" in
+                    n|no) print_info "已保留; 之后请在『节点管理→3.切换当前节点』自行切换" ;;
+                    *)
+                        cp "${CLIENT_NODE_DIR}/${name}.yaml" "${CLIENT_DIR}/current.yaml"
+                        systemctl restart hysteria-client.service
+                        if systemctl is-active --quiet hysteria-client.service; then
+                            print_ok "✓ 当前节点已设为 $name, 客户端已重启"
+                        else
+                            print_error "✗ 客户端重启失败; 请先在『5.诊断→1.健康检查』里看原因"
+                        fi
+                        ;;
+                esac
+            fi
             ;;
         2)
             read -p "yaml 文件路径: " yp
@@ -1913,8 +1933,8 @@ cc_traffic_tune() {
     fi
     ask_cli_traffic || return 1
     echo "" >&2
-    echo "  Chrome QUIC Fingerprint Parroting (v2.11.0+ 默认启用):" >&2
-    echo "  1) Enabled (默认)  2) Disabled" >&2
+    echo "  Chrome 握手伪装 (Chrome Parrot; 默认开):" >&2
+    echo "  1) 启用 (默认)  2) 停用" >&2
     printf "  选择 (默认1): " >&2
     read -r adj || adj=""
     case "$(clean_input2 "$adj")" in 2) CHROME_PARROT_ON=false;; *) CHROME_PARROT_ON=true;; esac
