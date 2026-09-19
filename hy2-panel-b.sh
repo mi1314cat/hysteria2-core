@@ -2195,9 +2195,34 @@ client_ports_edit() {
     echo
     echo "mihomo/Clash 出站片段 (在其他设备的 mihomo 中, 指向本机):"
     show_proxy_snippet
+    client_write_lan_mihomo >/dev/null 2>&1 && print_info "已写入文件: ${CLIENT_DIR}/out/mihomo-lan-hy2.yaml"
 }
 
 # 输出 mihomo/Clash outbound 片段 (由 current.yaml 监听推导; 127.0.0.1 会自动替换为本机 LAN IP)
+
+# 把 LAN mihomo 片段写成文件 ( 局域网其他 mihomo/Clash 客户端直接引用 )
+client_write_lan_mihomo() {
+    local f="${CLIENT_DIR}/out/mihomo-lan-hy2.yaml"
+    local snippet=$(show_proxy_snippet 2>/dev/null)
+    [[ -z "$snippet" ]] && return 1
+    mkdir -p "$(dirname "$f")"
+    { echo "# 局域网其它设备把下面这段加进自己的 mihomo 配置 (proxies: 列表里) 即可使用本机 HY2 通"
+      echo "# 生成时间: $(date +"%F %T")  服务端当前节点: $( awk "/^server:/{print \$2; exit}" "${CLIENT_DIR}/current.yaml" 2>/dev/null )"
+      echo "proxies:"
+      echo "$snippet"
+      echo ""
+      echo "proxy-groups:"
+      echo "  - name: HY2-LAN"
+      echo "    type: select"
+      echo "    proxies:"
+      echo "      - HY2-SOCKS5"
+      echo "      - HY2-HTTP"
+      echo ""
+      echo "rules:"
+      echo "  - MATCH,HY2-LAN"
+    } > "$f"
+}
+
 show_proxy_snippet() {
     [[ -f "$CLIENT_DIR/current.yaml" ]] || return 1
     local ip=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -2334,6 +2359,7 @@ client_node_switch() {
     local n=$(client_node_pick) || return 1
     cp "${CLIENT_NODE_DIR}/${n}.yaml" "${CLIENT_DIR}/current.yaml"
     print_ok "当前节点切换为: $n"
+    client_write_lan_mihomo >/dev/null 2>&1 && print_info "已更新 LAN mihomo 文件: ${CLIENT_DIR}/out/mihomo-lan-hy2.yaml"
 }
 client_show_current() {
     if [[ -f "${CLIENT_DIR}/current.yaml" ]]; then
